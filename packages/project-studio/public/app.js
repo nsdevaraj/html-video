@@ -219,25 +219,26 @@ function renderMain() {
           </div>
         </section>
 
-        <section class="text-pane">
-          <div class="text-pane-head">
-            <h2>Frame text</h2>
-            <span class="save-state" id="text-save-state">—</span>
-          </div>
-          <div class="text-fields" id="text-fields">
-            <div class="text-empty">Pick a template to see editable text fields here.</div>
-          </div>
-        </section>
-
         <section class="right-pane">
-          <div class="frames-strip" id="frames-strip"></div>
           <div class="preview-stage" id="preview-stage">
             <div class="preview-placeholder"><div><div class="ico">🎞️</div>Pick a template above to preview.</div></div>
           </div>
+          <div class="frames-strip" id="frames-strip"></div>
           <div class="right-footer">
             <span class="status" id="footer-status">no project</span>
             <span class="grow"></span>
             <button class="reload-btn" id="btn-reload">↻ Reload preview</button>
+          </div>
+        </section>
+
+        <section class="text-pane">
+          <div class="text-pane-head">
+            <h2>Frame text</h2>
+            <span class="save-state" id="text-save-state">—</span>
+            <button class="textfields-toggle" id="btn-textfields-toggle" title="Collapse panel">›</button>
+          </div>
+          <div class="text-fields" id="text-fields">
+            <div class="text-empty">Pick a template to see editable text fields here.</div>
           </div>
         </section>
         <div class="graph-modal" id="graph-modal">
@@ -261,6 +262,8 @@ function renderMain() {
   document.getElementById('btn-new').onclick = openNewModal;
   const togBtn = document.getElementById('btn-sidebar-toggle');
   if (togBtn) togBtn.onclick = () => document.body.classList.toggle('sidebar-collapsed');
+  const tfTog = document.getElementById('btn-textfields-toggle');
+  if (tfTog) tfTog.onclick = () => document.body.classList.toggle('textfields-collapsed');
   if (state.selected) {
     renderChatLog();
     renderComposer();
