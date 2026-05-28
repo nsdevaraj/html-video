@@ -87,6 +87,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         }
         if (m === 'DELETE') {
           await ctx.orchestrator.remove(id);
+          MESSAGES.delete(id);
           return json(res, 200, { ok: true });
         }
       }
@@ -249,10 +250,10 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         return json(res, 200, { agents });
       }
 
-      // Messages: GET history (in-memory only v0.2)
+      // Messages: GET history (lazy-loads from messages.json on first hit)
       const msgsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/messages$/);
       if (msgsMatch && msgsMatch[1] && m === 'GET') {
-        const arr = MESSAGES.get(msgsMatch[1]) ?? [];
+        const arr = await loadMessages(ctx, msgsMatch[1]);
         return json(res, 200, { messages: arr });
       }
 
@@ -309,13 +310,16 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         const attachmentSummary = attachments.length > 0
           ? `\n\n📎 ${attachments.length} attachment(s): ${attachments.map((a) => a.filename).join(', ')}`
           : '';
-        const history = MESSAGES.get(id) ?? [];
+        const history = await loadMessages(ctx, id);
         history.push({
           role: 'user',
           content: userText + attachmentSummary,
           ts: Date.now(),
         });
         MESSAGES.set(id, history);
+        // Persist immediately so the user message survives even if the
+        // streaming agent call below crashes mid-flight.
+        await saveMessages(ctx, id, history);
 
         // Compose prompt — template-aware OR template-free
         const projectDir = await ctx.projects.ensureDir(id);
@@ -413,6 +417,7 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           ts: Date.now(),
         });
         MESSAGES.set(id, history);
+        await saveMessages(ctx, id, history);
         // discard project0 reference to keep TS happy
         void project0;
         res.end();
@@ -639,7 +644,11 @@ void copyFile;
 void AssetStore;
 
 // ---------------------------------------------------------------------------
-// In-memory message history (v0.2 — persistence in v0.3)
+// Message history — in-memory cache, JSON file as source of truth.
+//
+// v0.8.2: previously memory-only, so chat history evaporated on every studio
+// restart. Now persisted to <projectDir>/messages.json. Cache is lazy-loaded
+// on first GET / POST per project; writes go through saveMessages().
 // ---------------------------------------------------------------------------
 
 interface ChatMessage {
@@ -652,6 +661,40 @@ interface ChatMessage {
 }
 
 const MESSAGES = new Map<string, ChatMessage[]>();
+
+async function loadMessages(ctx: CliContext, projectId: string): Promise<ChatMessage[]> {
+  const cached = MESSAGES.get(projectId);
+  if (cached) return cached;
+  const projectDir = await ctx.projects.ensureDir(projectId);
+  const filePath = join(projectDir, 'messages.json');
+  if (!existsSync(filePath)) {
+    MESSAGES.set(projectId, []);
+    return MESSAGES.get(projectId)!;
+  }
+  try {
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed) ? (parsed as ChatMessage[]) : [];
+    MESSAGES.set(projectId, arr);
+    return arr;
+  } catch {
+    // Corrupt file — start fresh in memory but don't overwrite the file
+    // until the next save (gives the user a chance to recover by hand).
+    MESSAGES.set(projectId, []);
+    return MESSAGES.get(projectId)!;
+  }
+}
+
+async function saveMessages(
+  ctx: CliContext,
+  projectId: string,
+  messages: ChatMessage[],
+): Promise<void> {
+  const projectDir = await ctx.projects.ensureDir(projectId);
+  const filePath = join(projectDir, 'messages.json');
+  const fs = await import('node:fs/promises');
+  await fs.writeFile(filePath, JSON.stringify(messages, null, 2), 'utf8');
+}
 
 // `Attachment` is declared above (at the buildHtmlGenerationPrompt section)
 
