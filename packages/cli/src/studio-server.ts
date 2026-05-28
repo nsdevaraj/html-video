@@ -739,73 +739,133 @@ interface Attachment {
  * Whether the agent writes HTML this turn is up to the agent. The server
  * extracts a fenced ```html block if present; if not, it's just a chat reply.
  */
+/**
+ * Recognise which phase the conversation is in so we can hand the agent a
+ * single, narrow prompt. State machine (see RFC-07 — flow chart):
+ *
+ *   opener    → first short / vague user message; expect hv-options card
+ *               for content-type pick
+ *   info      → user picked an option → expect hv-form to collect
+ *               brand / headline / data / aspect / duration / frame_count / style
+ *   confirm   → user submitted hv-form ([hv-form:submit]\n<json>) →
+ *               expect hv-confirm card
+ *   generate  → user clicked "✓ 开始生成" ([hv-confirm:generate]) →
+ *               this is the only turn that may emit HTML / content-graph
+ *   info-edit → user clicked "✏️ 修改" ([hv-confirm:edit]) →
+ *               re-emit hv-form with `default` values prefilled
+ *   iterate   → after a successful generate, the user free-forms more
+ *               revisions on the rendered HTML (the v0.7 path)
+ */
+type ConvPhase = 'opener' | 'info' | 'info-edit' | 'confirm' | 'generate' | 'iterate';
+
+interface PhaseInputs {
+  collected?: Record<string, string>; // last submitted hv-form values
+  pickedType?: string;                // label from the opener hv-options card
+}
+
+function detectPhase(history: ChatMessage[], userText: string): { phase: ConvPhase; inputs: PhaseInputs } {
+  const trimmed = userText.trim();
+  const inputs: PhaseInputs = {};
+
+  // Look at the latest meaningful exchange. A user turn can be one of:
+  //   "[hv-form:submit]\n<json>"   → previous card was hv-form, now confirm
+  //   "[hv-confirm:generate]"      → run the generator
+  //   "[hv-confirm:edit]"          → re-show the form, pre-filled
+  //   anything else                → pick by previous assistant card kind
+  if (trimmed.startsWith('[hv-form:submit]')) {
+    const body = trimmed.slice('[hv-form:submit]'.length).trim();
+    try { inputs.collected = JSON.parse(body); } catch { /* leave undefined */ }
+    return { phase: 'confirm', inputs };
+  }
+  if (trimmed === '[hv-confirm:generate]') {
+    inputs.collected = lastFormSubmission(history);
+    inputs.pickedType = lastTypePick(history);
+    return { phase: 'generate', inputs };
+  }
+  if (trimmed === '[hv-confirm:edit]') {
+    inputs.collected = lastFormSubmission(history);
+    return { phase: 'info-edit', inputs };
+  }
+
+  // Without an explicit marker — what was the previous assistant card?
+  const prevCard = lastAssistantCardKind(history);
+  if (prevCard === 'hv-options') {
+    // User answered the opener type-pick card.
+    inputs.pickedType = trimmed;
+    return { phase: 'info', inputs };
+  }
+  if (prevCard === 'hv-form' || prevCard === 'hv-confirm') {
+    // Free-form text after a form/confirm card means the user typed
+    // something instead of using the buttons. Fall through to iterate so
+    // the agent can interpret it.
+    inputs.collected = lastFormSubmission(history);
+    return { phase: 'iterate', inputs };
+  }
+
+  // No prior card. Either truly first turn, or post-generation iteration.
+  const hadGeneration = history.some(
+    (m) => m.role === 'assistant' && /```html|```json#content-graph|✓\s/i.test(m.content),
+  );
+  if (hadGeneration) return { phase: 'iterate', inputs: { collected: lastFormSubmission(history) } };
+
+  return { phase: 'opener', inputs };
+}
+
+function lastAssistantCardKind(history: ChatMessage[]): 'hv-options' | 'hv-form' | 'hv-confirm' | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    if (m.role !== 'assistant') continue;
+    if (/```hv-confirm\s*\n/i.test(m.content)) return 'hv-confirm';
+    if (/```hv-form\s*\n/i.test(m.content)) return 'hv-form';
+    if (/```hv-options\s*\n/i.test(m.content)) return 'hv-options';
+    // Skip empty / warning-only assistant turns — the live card is one further back.
+    if (!m.content.trim()) continue;
+    if (/^⚠️/.test(m.content.trim())) continue;
+    // A real assistant message with no card resets the search.
+    return null;
+  }
+  return null;
+}
+
+function lastFormSubmission(history: ChatMessage[]): Record<string, string> | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    if (m.role !== 'user') continue;
+    const match = /^\[hv-form:submit\]\s*\n([\s\S]+)$/.exec(m.content.trim());
+    if (match && match[1]) {
+      try { return JSON.parse(match[1]); } catch { /* keep scanning */ }
+    }
+  }
+  return undefined;
+}
+
+function lastTypePick(history: ChatMessage[]): string | undefined {
+  // The first user turn that immediately follows the opener hv-options card.
+  for (let i = 0; i < history.length - 1; i++) {
+    const a = history[i]!;
+    const u = history[i + 1]!;
+    if (a.role === 'assistant' && u.role === 'user' && /```hv-options\s*\n/i.test(a.content)) {
+      return u.content.trim();
+    }
+  }
+  return undefined;
+}
+
 function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
   const { tmpl, exampleHtml, priorHtml, history, userText, attachments } = args;
 
   const baseHtml = priorHtml && priorHtml !== exampleHtml ? priorHtml : exampleHtml;
-  const isFirstTurn = history.filter((m) => m.role === 'user').length <= 1;
-
-  // Detect "user is answering an hv-options card".
-  //
-  // Subtlety: a previous empty/failed assistant turn means the latest
-  // assistant message has no hv-options block, but the relevant card is
-  // one turn earlier. So we scan back for the most recent assistant that
-  // DID emit options, and only treat it as "active" if no later user turn
-  // already replied to a draft (i.e. agent didn't successfully produce HTML
-  // since then — the card is still the live question).
-  const optionsBlock = /```hv-options\s*\n[\s\S]*?```/i;
-  let cardAssistant: ChatMessage | null = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const m = history[i]!;
-    if (m.role !== 'assistant') continue;
-    if (optionsBlock.test(m.content)) {
-      cardAssistant = m;
-      break;
-    }
-    // If we hit an assistant turn that DID produce content (HTML / graph
-    // summary lines) before finding a card, the card has been resolved.
-    const hasContent = /```html|```json#content-graph|✓\s/i.test(m.content);
-    if (hasContent) break;
-  }
-  const answeringOptions = !!cardAssistant && !isFirstTurn;
-
-  // Detect "opener" — short greeting / vague intent. Empirically,
-  // `claude --print` returns an empty string when the prompt offers a binary
-  // draft-vs-ask choice and the user's message is too short to commit either
-  // way ("你好", "hi", "做个视频" …). Force-pick the ask path with a tight
-  // hv-options card schema so the model has exactly one job.
   const trimmed = userText.trim();
-  const isOpener =
-    !answeringOptions &&
-    trimmed.length < 30 &&
-    !/brand|outro|intro|launch|demo|video|chart|data|product|tagline|视频|品牌|预告|发布|讲解|介绍|对比|时间线/i.test(
-      trimmed,
-    );
+  const { phase, inputs } = detectPhase(history, userText);
 
-  // Heuristic: a "concrete" first turn (≥ 8 words OR mentions a brand/product/topic
-  // word) gets the direct-draft path. A short / vague turn gets the explorer path.
-  // When the user is answering options, treat the turn as concrete — they
-  // already made a choice, no point asking more questions.
-  const concrete =
-    answeringOptions ||
-    userText.trim().split(/\s+/).length >= 8 ||
-    /brand|outro|intro|launch|demo|video|chart|data|product|tagline/i.test(userText);
-
-  const parts: string[] = [];
-
-  // Opener path: stripped-down prompt that ONLY asks the agent to emit a
-  // welcoming line + an hv-options card. No source HTML, no decision tree,
-  // no multi-frame schema — those would tempt claude --print into emitting
-  // nothing.
-  if (isOpener) {
+  // ---- opener ----
+  if (phase === 'opener') {
     const opener: string[] = [];
     opener.push(
       `The user just opened a project and said "${trimmed}". You are an HTML-video creation assistant.`,
     );
     opener.push('');
-    opener.push(
-      `Reply with TWO things, in this exact order:`,
-    );
+    opener.push(`Reply with TWO things, in this exact order:`);
     opener.push(
       `1. ONE friendly opening sentence in the user's language (≤ 25 chars), e.g. "你好！想做点什么？" or "Hi! What kind of video?".`,
     );
@@ -827,224 +887,189 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
     opener.push('');
     if (tmpl) {
       opener.push(
-        `Note: a template "${tmpl.name}" is currently selected (${tmpl.description}), but treat it as a visual style reference only. Don't let its name pin the user to one use case — they may want to repurpose the look for any of the 4 content types above.`,
+        `Note: a template "${tmpl.name}" is currently selected (${tmpl.description}), but treat it as a visual style reference only — content type still drives the structure.`,
       );
       opener.push('');
     }
-    opener.push(
-      `Do NOT write HTML this turn. Do NOT return an empty reply. The hv-options block is REQUIRED.`,
-    );
+    opener.push(`Do NOT write HTML this turn. Do NOT return an empty reply. The hv-options block is REQUIRED.`);
     return opener.join('\n');
   }
 
-  // When the user is answering an hv-options card, return a stripped-down
-  // direct-draft prompt and skip the rest of the explorer/concrete branching.
-  // Empirically: a long branching prompt + a 4-character user reply makes
-  // claude --print return an empty string (Joey hit this on every 2nd turn).
-  if (answeringOptions) {
-    const optMatch = /```hv-options\s*\n([\s\S]*?)```/i.exec(cardAssistant!.content);
-    let question = '';
-    let pickedHint = '';
-    if (optMatch && optMatch[1]) {
-      try {
-        const parsed = JSON.parse(optMatch[1].trim());
-        question = String(parsed.question ?? '');
-        const matched = (parsed.options || []).find(
-          (o: { label?: string }) => o && o.label === userText.trim(),
-        );
-        if (matched && typeof matched === 'object' && 'hint' in matched) {
-          pickedHint = String((matched as { hint?: string }).hint ?? '');
-        }
-      } catch {
-        // ignore
-      }
+  // ---- info / info-edit: emit hv-form ----
+  if (phase === 'info' || phase === 'info-edit') {
+    const isEdit = phase === 'info-edit';
+    const pre = inputs.collected ?? {};
+    const pickedType = isEdit ? lastTypePick(history) : inputs.pickedType;
+    const isMulti = !!pickedType && /多帧|预告|时间线|对比|讲解|teaser|explainer|comparison|timeline/i.test(pickedType);
+    const defaults = {
+      topic: pre.topic ?? '',
+      headline: pre.headline ?? '',
+      data: pre.data ?? '',
+      aspect: pre.aspect ?? '16:9',
+      duration: pre.duration ?? (isMulti ? '15' : '5'),
+      frame_count: pre.frame_count ?? (isMulti ? '4' : '1'),
+      style: pre.style ?? '',
+    };
+    const p: string[] = [];
+    if (isEdit) {
+      p.push(`The user wants to revise the inputs they submitted earlier. Re-emit the SAME hv-form card with each \`default\` field set to their last answer so they only have to change what they want.`);
+    } else {
+      p.push(`The user picked "${pickedType ?? 'a content type'}". Now collect the concrete inputs needed to generate the video — emit ONE \`\`\`hv-form block with the fields below, and a brief one-line preamble in the user's language inviting them to fill it in.`);
     }
-    const directParts: string[] = [];
-    directParts.push(
-      `Write a self-contained HTML video file based on the user's pick.`,
-    );
-    directParts.push('');
-    if (question) directParts.push(`Earlier question: ${question}`);
-    directParts.push(
-      `User's pick: ${userText.trim()}${pickedHint ? ` (${pickedHint})` : ''}`,
-    );
-    directParts.push('');
-    directParts.push(
-      `Constraints: full-bleed 1920×1080, opens with an animation timeline, inline CSS + JS, single complete <!doctype html>...</html> document. CDN imports (Tailwind, GSAP) are fine. Tag every visible text node with data-hv-text set to a stable key (brand_name, headline, item_1, cta…). No prose outside code blocks.`,
-    );
-    directParts.push('');
-    directParts.push(`Output ONE of these:`);
-    directParts.push(
-      `  A) Single HTML file in a fenced \`\`\`html block — for a single brand card / title moment.`,
-    );
-    directParts.push(
-      `  B) Multi-frame: first a \`\`\`json#content-graph block (schemaVersion:1, intent, nodes:[{id,kind:text|data|entity,durationSec,...}], edges:[{from,to,kind:sequence|dependency|contrast}]), then one complete HTML document per node in a fenced \`\`\`html#<nodeId> block — for a teaser / explainer / timeline.`,
-    );
-    directParts.push('');
-    directParts.push(
-      `For "预告片" / "teaser" / "explainer" / multi-step content, prefer B. Otherwise A.`,
-    );
-    directParts.push(
-      `Do NOT ask another multiple-choice question. Do NOT return an empty reply.`,
-    );
-    if (priorHtml && priorHtml !== exampleHtml) {
-      directParts.push('');
-      directParts.push(`Prior preview HTML (iterate on it, or replace if a different vibe is better):`);
-      directParts.push('```html');
-      directParts.push(priorHtml.slice(0, 4000));
-      directParts.push('```');
+    p.push('');
+    p.push('```hv-form');
+    p.push(JSON.stringify({
+      title: isEdit ? '改一下这些信息' : '讲一下你想做的视频…',
+      fields: [
+        { key: 'topic',       label: '主题 / 是关于什么的',  kind: 'text',     placeholder: '例如：nexu-io 产品发布', required: true, default: defaults.topic },
+        { key: 'headline',    label: 'Headline / 主标题',     kind: 'text',     placeholder: '例如：The Self-Evolving Design Agent', required: true, default: defaults.headline },
+        { key: 'data',        label: '关键数字 / 数据 (可选)', kind: 'textarea', placeholder: '例如：50K stars in 25 days\nTemplates: 231 / Skills: 15', default: defaults.data },
+        { key: 'aspect',      label: '画面尺寸',              kind: 'select',   options: ['16:9 横屏','9:16 手机竖屏','1:1 方形','4:5 小红书'], required: true, default: defaults.aspect.length === 3 || defaults.aspect.length === 4 ? `${defaults.aspect}${defaults.aspect === '16:9' ? ' 横屏' : defaults.aspect === '9:16' ? ' 手机竖屏' : defaults.aspect === '1:1' ? ' 方形' : ' 小红书'}` : defaults.aspect },
+        { key: 'duration',    label: '时长 (秒)',             kind: 'select',   options: ['3','5','10','15','30'], required: true, default: defaults.duration },
+        { key: 'frame_count', label: isMulti ? '帧数 (画面数)' : '帧数', kind: 'text', placeholder: isMulti ? '例如：4' : '单帧 = 1', required: true, default: defaults.frame_count },
+        { key: 'style',       label: '风格描述 (可选)',       kind: 'textarea', placeholder: '例如：cyberpunk glitch / Swiss minimalist', default: defaults.style },
+      ],
+      allow_attachments: true,
+    }, null, 2));
+    p.push('```');
+    p.push('');
+    p.push(`Do NOT write HTML this turn. Do NOT return an empty reply. The hv-form block is REQUIRED.`);
+    return p.join('\n');
+  }
+
+  // ---- confirm: emit hv-confirm summarising what was collected ----
+  if (phase === 'confirm') {
+    const collected = inputs.collected ?? {};
+    const pickedType = lastTypePick(history) ?? '';
+    const summaryRows: { label: string; value: string }[] = [];
+    if (pickedType) summaryRows.push({ label: '类型', value: pickedType });
+    const labelMap: Record<string, string> = {
+      topic: '主题', headline: 'Headline', data: '数据', aspect: '尺寸',
+      duration: '时长', frame_count: '帧数', style: '风格',
+    };
+    for (const k of ['topic', 'headline', 'data', 'aspect', 'duration', 'frame_count', 'style']) {
+      const v = collected[k];
+      if (v) summaryRows.push({ label: labelMap[k] ?? k, value: v });
     }
     if (attachments.length > 0) {
-      directParts.push('');
-      directParts.push(`Attachments:`);
-      for (const a of attachments) {
-        directParts.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
-      }
+      summaryRows.push({ label: '素材', value: attachments.map((a) => a.filename).join(', ') });
     }
-    return directParts.join('\n');
+
+    const p: string[] = [];
+    p.push(`The user has filled in their inputs. Emit ONE \`\`\`hv-confirm block (no other code blocks) summarising what you've got, in the user's language. Use this exact JSON:`);
+    p.push('');
+    p.push('```hv-confirm');
+    p.push(JSON.stringify({
+      title: '按这些信息生成？',
+      summary: summaryRows,
+      actions: ['generate', 'edit'],
+    }, null, 2));
+    p.push('```');
+    p.push('');
+    p.push(`Do NOT write HTML this turn. Do NOT return an empty reply. The hv-confirm block is REQUIRED.`);
+    return p.join('\n');
   }
 
-  if (concrete) {
-    // === Direct-draft path: minimal preamble, no decision tree, just go ===
-    parts.push(`Create an HTML video file based on the user's request below.`);
-    parts.push('');
-  } else {
-    // === Explorer path: agent may ask questions or offer hv-options ===
-    parts.push(`# Role`);
-    parts.push(
-      `You are a Hyperframes video creation collaborator. The user wants ONE self-contained HTML file that opens with animation and is ready to be recorded into an MP4.`,
-    );
-    parts.push('');
-    parts.push(`# Behaviour`);
-    parts.push(`- If the user's request is concrete enough to make a good first draft, generate the HTML directly (see Output rules below).`);
-    parts.push(`- If the request is too vague, ask 1–3 short, sharp questions to surface what's missing. Pick whichever 1–3 things are blocking *this* particular project — don't run a fixed audience/platform/style checklist.`);
-    parts.push(`- When the user attaches files, use them: images / video links as visual style references, logos / photos as actual assets to embed, data files as content, text files as copy.`);
-    parts.push(`- When the user describes a style in words (e.g. "warm grain magazine", "cyberpunk glitch", "Swiss minimalist"), translate that into concrete CSS.`);
-    parts.push(`- Keep chat replies brief. The HTML is the artefact.`);
-    parts.push('');
-  }
+  // ---- generate: actually write the HTML / content-graph ----
+  if (phase === 'generate') {
+    const collected = inputs.collected ?? {};
+    const pickedType = inputs.pickedType ?? '';
+    const aspect = ((collected.aspect ?? '16:9').split(/\s+/)[0] ?? '16:9'); // strip "16:9 横屏" → "16:9"
+    const [w, h] = aspect.includes(':') ? aspect.split(':').map(Number) : [16, 9];
+    const isMulti = /多帧|预告|时间线|对比|讲解|teaser|explainer|comparison|timeline/i.test(pickedType)
+      || Number(collected.frame_count ?? '1') > 1;
 
-  if (tmpl) {
-    parts.push(`# Template currently selected`);
-    parts.push(`${tmpl.name} (${tmpl.category}) — ${tmpl.description}`);
-    parts.push(`The template's visual signature (colors, animation timing, layout) should be preserved unless the user explicitly asks for a deviation.`);
-    parts.push('');
-  } else {
-    parts.push(`# No template — write from scratch`);
-    parts.push(`The user has NOT picked a template. You're free to design the visual style yourself, guided by:`);
-    parts.push(`  · the user's description in plain language ("warm grain magazine", "neon cyberpunk", "Swiss grid", etc)`);
-    parts.push(`  · any image / link attachments they provide as style references`);
-    parts.push(`  · any prior preview HTML below (iterate on it instead of starting over)`);
-    parts.push(`Hyperframes-style HTML conventions still apply: full-bleed 1920×1080, opens with an animation timeline, inline CSS+JS, no build step. Use Tailwind CDN if you want utility classes; use GSAP CDN if you want richer motion. Keep it ONE complete <!doctype html>...</html> document.`);
-    parts.push('');
-  }
+    // Pick a concrete pixel resolution that respects the aspect choice.
+    let resolution = '1920×1080';
+    if (aspect === '9:16') resolution = '1080×1920';
+    else if (aspect === '1:1') resolution = '1080×1080';
+    else if (aspect === '4:5') resolution = '1080×1350';
 
-  if (attachments.length > 0) {
-    parts.push(`# Attachments in this turn`);
-    for (const a of attachments) {
-      parts.push(`- [${a.kind}] ${a.filename} (${a.size} bytes) — ${a.path}`);
+    const p: string[] = [];
+    p.push(`Generate the HTML video file(s) the user just confirmed.`);
+    p.push('');
+    p.push(`Inputs (use these LITERALLY — do NOT make up brand names or facts):`);
+    p.push(`- 类型 / type: ${pickedType || '(未指定)'}`);
+    if (collected.topic)       p.push(`- 主题 / topic: ${collected.topic}`);
+    if (collected.headline)    p.push(`- Headline: ${collected.headline}`);
+    if (collected.data)        p.push(`- 关键数字 / data:\n  ${collected.data.replace(/\n/g, '\n  ')}`);
+    if (collected.style)       p.push(`- 风格: ${collected.style}`);
+    p.push(`- 画面尺寸: ${aspect} (${resolution})`);
+    p.push(`- 时长: ${collected.duration ?? '?'} 秒`);
+    p.push(`- 帧数: ${collected.frame_count ?? (isMulti ? '4' : '1')}`);
+    p.push('');
+    if (attachments.length > 0) {
+      p.push(`Attachments:`);
+      for (const a of attachments) p.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
+      p.push(`Use these as actual assets where appropriate (logo, screenshot, data file).`);
+      p.push('');
     }
-    parts.push(`Use these as references or assets. Reference image paths in <img src="..."> as needed.`);
-    parts.push('');
-  }
-
-  if (baseHtml) {
-    parts.push(`# Source HTML (the current preview state)`);
-    parts.push('```html');
-    parts.push(baseHtml.slice(0, 6000));
-    parts.push('```');
-    parts.push('');
-  } else {
-    parts.push(`# Source HTML`);
-    parts.push(`(nothing yet — this will be the first draft)`);
-    parts.push('');
-  }
-
-  const recentUserTurns = history
-    .filter((m) => m.role === 'user')
-    .slice(-4, -1)
-    .map((m) => m.content);
-  if (recentUserTurns.length > 0) {
-    parts.push(`# Earlier user messages in this conversation`);
-    for (const t of recentUserTurns) parts.push(`- ${t.slice(0, 240)}`);
-    parts.push('');
-  }
-
-  parts.push(`# User message`);
-  parts.push(userText);
-  parts.push('');
-
-  if (concrete) {
-    // Direct-draft path: terse output rules, no branching = claude doesn't stall
-    parts.push(`Output rules — pick ONE path:`);
-    parts.push('');
-    parts.push(`A) **Single-frame fast path** — for short brand cards, title cards, single moments, simple promo loops:`);
-    parts.push(`   - Reply with one complete HTML document inside a fenced \`\`\`html code block.`);
-    parts.push(`   - Inline all CSS and JS. CDN imports fine.`);
-    parts.push(`   - Tag every visible text node with data-hv-text set to a stable key (brand_name, tagline, headline, item_1, cta).`);
-    parts.push(`   - No prose outside the code block.`);
-    parts.push('');
-    parts.push(`B) **Multi-frame path** — for explainers, timelines, before/after comparisons, step-by-step walkthroughs, anything ≥ 2 distinct moments:`);
-    parts.push(`   1. First emit a content-graph JSON in a fenced \`\`\`json#content-graph block. Schema:`);
-    parts.push(`      {`);
-    parts.push(`        "schemaVersion": 1,`);
-    parts.push(`        "intent": "single-frame" | "explainer" | "data-viz" | "promo" | "comparison" | "other",`);
-    parts.push(`        "synopsis": "one-line video description",`);
-    parts.push(`        "nodes": [`);
-    parts.push(`          { "id": "intro", "kind": "text", "label": "Intro", "frameIntent": "title-card", "durationSec": 3, "text": "..." },`);
-    parts.push(`          { "id": "stat_users", "kind": "data", "frameIntent": "data-bar", "durationSec": 4, "data": { "label": "MAU", "value": "1.2M" } },`);
-    parts.push(`          { "id": "outro", "kind": "entity", "frameIntent": "outro", "durationSec": 3, "props": { "logo_text": "BrandName" } }`);
-    parts.push(`        ],`);
-    parts.push(`        "edges": [`);
-    parts.push(`          { "from": "intro", "to": "stat_users", "kind": "sequence" },`);
-    parts.push(`          { "from": "stat_users", "to": "outro", "kind": "sequence" }`);
-    parts.push(`        ]`);
-    parts.push(`      }`);
-    parts.push(`      Edge kinds: "sequence" (soft order hint), "dependency" (hard topo constraint), "contrast" (semantic, doesn't affect order).`);
-    parts.push(`   2. Then emit ONE complete HTML document per node, each in a fenced \`\`\`html#<nodeId> code block (e.g. \`\`\`html#intro). Each frame is a self-contained 1920×1080 page that opens with its own animation timeline. Tag visible text with data-hv-text.`);
-    parts.push(`   3. No prose outside the code blocks.`);
-    parts.push('');
-    parts.push(`Choose A or B based on the user's request. When in doubt for a request that mentions multiple things in sequence, pick B.`);
-  } else {
-    if (isFirstTurn) {
-      parts.push(`(This is the first turn. If the message is concrete enough, just draft. Otherwise ask 1–3 questions to surface what's missing — or use the multiple-choice format below.)`);
-      parts.push('');
+    p.push(`Constraints: full-bleed ${resolution}, opens with an animation timeline, inline CSS + JS, single complete <!doctype html>...</html> document(s). CDN imports (Tailwind, GSAP) are fine. Tag every visible text node with data-hv-text set to a stable key (brand_name, headline, item_1, cta…). No prose outside code blocks.`);
+    p.push('');
+    if (isMulti) {
+      p.push(`Output (multi-frame storyboard) — emit IN THIS ORDER:`);
+      p.push(`1. ONE \`\`\`json#content-graph block with schemaVersion:1, intent (single-frame|explainer|data-viz|promo|comparison|other), synopsis, nodes:[{id,kind:text|data|entity,durationSec,...}], edges:[{from,to,kind:sequence|dependency|contrast}].`);
+      p.push(`2. ONE complete HTML document per node, each in a fenced \`\`\`html#<nodeId> block. Each frame is self-contained.`);
+    } else {
+      p.push(`Output (single-frame): begin your reply with \`\`\`html and end with \`\`\`. Nothing outside the block.`);
     }
-    parts.push(`# When you decide to draft HTML — pick ONE path`);
-    parts.push('');
-    parts.push(`**A) Single-frame fast path** (short brand card / title / single moment):`);
-    parts.push(`- Reply with one complete HTML document inside a fenced \`\`\`html code block.`);
-    parts.push(`- Inline all CSS and JS. CDN imports fine.`);
-    parts.push(`- Tag every visible text node with data-hv-text set to a stable key. Preserve existing keys.`);
-    parts.push('');
-    parts.push(`**B) Multi-frame path** (explainer / timeline / comparison / walkthrough):`);
-    parts.push(`- Emit a \`\`\`json#content-graph block first (nodes + edges; see schema below).`);
-    parts.push(`- Then one \`\`\`html#<nodeId> block per node — each is a complete 1920×1080 HTML page with its own animation timeline.`);
-    parts.push(`- Tag visible text with data-hv-text. No prose between blocks.`);
-    parts.push('');
-    parts.push(`Content-graph schema (B path):`);
-    parts.push(`  schemaVersion: 1`);
-    parts.push(`  intent: "single-frame" | "explainer" | "data-viz" | "promo" | "comparison" | "other"`);
-    parts.push(`  synopsis: string (one-line)`);
-    parts.push(`  nodes: [{ id, kind: "entity"|"data"|"text", label?, frameIntent?, durationSec?, ...kindSpecific }]`);
-    parts.push(`  edges: [{ from, to, kind: "sequence"|"dependency"|"contrast", reason? }]`);
-    parts.push('');
-    parts.push(`# When you ask questions instead`);
-    parts.push(`Reply in plain conversational text. Markdown renders (**bold**, lists, headings).`);
-    parts.push('');
-    parts.push(`# Multiple-choice question format`);
-    parts.push(`When a question has 2–6 natural options, emit a fenced code block whose language tag is hv-options. Body is JSON:`);
-    parts.push(`  { "question": "...", "options": [{ "label": "...", "hint": "..." }, ...], "allow_freeform": true }`);
-    parts.push(`Rules: 2–6 options, each label ≤ 30 chars, distinct, the only block in that turn, allow_freeform:true when custom answers are useful.`);
-
+    p.push('');
+    if (baseHtml && baseHtml.length > 0) {
+      p.push(`Prior preview HTML (iterate on its visual style if it fits, or replace if a different vibe is better):`);
+      p.push('```html');
+      p.push(baseHtml.slice(0, 4000));
+      p.push('```');
+    } else {
+      // Empirically, claude --print returns nothing on a "create a video" prompt
+      // with no reference HTML at all. A tiny skeleton anchors the response.
+      p.push(`Skeleton to extend (replace placeholder text with the inputs above, expand styling to match the type / style):`);
+      p.push('```html');
+      p.push(`<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;background:#000;color:#fff;overflow:hidden;font-family:system-ui,sans-serif}
+.stage{width:100vw;height:100vh;display:grid;place-items:center;text-align:center;padding:6vw}
+h1{font-size:8vw;letter-spacing:-.03em;animation:in 1.2s ease forwards;opacity:0;transform:translateY(24px)}
+@keyframes in{to{opacity:1;transform:none}}
+</style></head><body>
+<div class="stage"><h1 data-hv-text="headline">PLACEHOLDER</h1></div>
+</body></html>`);
+      p.push('```');
+    }
+    p.push('');
     if (tmpl) {
-      parts.push('');
-      parts.push(`## Avoid template-name tunnel vision`);
-      parts.push(`Don't let the template's name force every option into one use case. Templates are visual skeletons; users repurpose them. Include at least one broader-scope option when offering choices: a longer/full video, a series, or a different scenario.`);
+      p.push(`Template visual signature: ${tmpl.name} — ${tmpl.description}. Honour it unless the user's style note overrides.`);
+      p.push('');
     }
+    p.push(`Do NOT return an empty reply. Do NOT emit any of \`\`\`hv-options / \`\`\`hv-form / \`\`\`hv-confirm — those are over.`);
+    // discard variable since some lints complain
+    void w; void h;
+    return p.join('\n');
   }
 
-  return parts.join('\n');
+  // ---- iterate: post-generation free-form revision ----
+  // Tight prompt: agent should treat user's text as a revision instruction
+  // applied to the existing preview HTML (or storyboard). No decision tree,
+  // no card schemas — those are over.
+  const it: string[] = [];
+  it.push(`The user is iterating on an existing HTML video. Apply their revision request below to the prior preview HTML, keeping the visual identity unless they ask for a different one.`);
+  it.push('');
+  it.push(`# User revision request`);
+  it.push(userText);
+  it.push('');
+  if (attachments.length > 0) {
+    it.push(`# Attachments`);
+    for (const a of attachments) it.push(`- [${a.kind}] ${a.filename} — ${a.path}`);
+    it.push('');
+  }
+  if (baseHtml) {
+    it.push(`# Prior preview HTML`);
+    it.push('```html');
+    it.push(baseHtml.slice(0, 6000));
+    it.push('```');
+    it.push('');
+  }
+  it.push(`Output: ONE complete HTML document inside a fenced \`\`\`html code block. Inline all CSS / JS. Tag visible text with data-hv-text. No prose outside the block. Do NOT emit hv-options / hv-form / hv-confirm — those are over.`);
+  return it.join('\n');
 }
 
 /**

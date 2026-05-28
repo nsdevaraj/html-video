@@ -458,6 +458,62 @@ function renderChatLog() {
     });
     if (sendBtn) sendBtn.onclick = submit;
   });
+  // hv-form: collect field values + optional file attachments, submit as
+  // [hv-form:submit]\n<json>. Files go through the existing pendingAttachments
+  // path so the server multipart handler treats them like normal uploads.
+  log.querySelectorAll('button.form-submit[data-form-msg]').forEach((btn) => {
+    btn.onclick = async () => {
+      const msgIdx = Number(btn.dataset.formMsg);
+      const m = state.messages[msgIdx];
+      if (!m || m.formSubmitted) return;
+      const card = btn.closest('.form-card');
+      if (!card) return;
+      const collected = {};
+      let missing = null;
+      card.querySelectorAll('[data-form-key]').forEach((el) => {
+        const key = el.dataset.formKey;
+        const val = (el.value || '').trim();
+        if (!val && el.previousElementSibling?.querySelector('.req')) missing = key;
+        collected[key] = val;
+      });
+      if (missing) {
+        toast(`请填写 ${missing}`, 'warn');
+        return;
+      }
+      m.formSubmitted = collected;
+      // Files: read from the existing form-att-<msgIdx> tray and route them
+      // through state.pendingAttachments so sendMessage's multipart path picks
+      // them up.
+      const submitText = `[hv-form:submit]\n${JSON.stringify(collected, null, 2)}`;
+      const ta = document.getElementById('composer-input');
+      if (ta) ta.value = submitText;
+      await sendMessage();
+    };
+  });
+  // hv-form attach button — same flow as composer's 📎 button, scoped to the card.
+  log.querySelectorAll('button.form-attach-btn[data-form-msg]').forEach((btn) => {
+    btn.onclick = () => {
+      const msgIdx = Number(btn.dataset.formMsg);
+      const fi = document.getElementById(`form-file-${msgIdx}`);
+      if (fi) fi.click();
+    };
+  });
+  log.querySelectorAll('input[type="file"][id^="form-file-"]').forEach((fi) => {
+    fi.onchange = (e) => addAttachments([...e.target.files]);
+  });
+  // hv-confirm: generate / edit buttons
+  log.querySelectorAll('[data-confirm-msg]').forEach((btn) => {
+    btn.onclick = async () => {
+      const msgIdx = Number(btn.dataset.confirmMsg);
+      const action = btn.dataset.action;
+      const m = state.messages[msgIdx];
+      if (!m || m.confirmResolved) return;
+      m.confirmResolved = action === 'generate' ? '✓ 开始生成' : '✏️ 改一下';
+      const ta = document.getElementById('composer-input');
+      if (ta) ta.value = action === 'generate' ? '[hv-confirm:generate]' : '[hv-confirm:edit]';
+      await sendMessage();
+    };
+  });
   log.scrollTop = log.scrollHeight;
 }
 
@@ -470,12 +526,65 @@ async function pickAndSend(label) {
 }
 
 function renderMessage(m, idx) {
-  if (m.role === 'user') return `<div class="msg user">${esc(m.content)}</div>`;
+  if (m.role === 'user') {
+    // User-side form-submission marker carries hidden JSON the user can't read;
+    // show a friendlier label instead of a wall of "topic=foo\nheadline=bar…".
+    const formMatch = /^\[hv-form:submit\]\n([\s\S]*)$/.exec(m.content ?? '');
+    if (formMatch) {
+      return `<div class="msg user">📋 提交了表单</div>`;
+    }
+    if ((m.content ?? '').trim() === '[hv-confirm:generate]') {
+      return `<div class="msg user">✓ 确认生成</div>`;
+    }
+    if ((m.content ?? '').trim() === '[hv-confirm:edit]') {
+      return `<div class="msg user">✏️ 改一下</div>`;
+    }
+    return `<div class="msg user">${esc(m.content)}</div>`;
+  }
   if (m.role === 'system') return `<div class="msg system">${esc(m.content)}</div>`;
   if (m.role === 'preview-event') return `<div class="msg preview-event">${esc(m.content)}</div>`;
   if (m.role === 'thinking') return `<div class="msg thinking">${esc(m.content || 'thinking')}</div>`;
-  // assistant: split out the hv-options block (if any), markdown the rest
-  const { prose, options } = parseHvOptions(m.content ?? '');
+  // assistant: try each card protocol in turn
+  const raw = m.content ?? '';
+  const formP = parseHvForm(raw);
+  if (formP.form) {
+    // Resolve "submitted" from history: any user turn after this card with
+    // [hv-form:submit] marker counts as the answer.
+    let submitted = m.formSubmitted;
+    if (!submitted) {
+      const nextUser = state.messages.slice(idx + 1).find((x) => x.role === 'user');
+      if (nextUser) {
+        const fm = /^\[hv-form:submit\]\n([\s\S]*)$/.exec(nextUser.content ?? '');
+        if (fm && fm[1]) {
+          try { submitted = JSON.parse(fm[1]); } catch { submitted = null; }
+        }
+      }
+    }
+    const formHtml = renderFormCard(formP.form, submitted, idx);
+    return `<div class="msg assistant">
+      <div class="role">${esc(m.agent ?? 'agent')}</div>
+      <div class="body">${md(formP.prose)}${formHtml}</div>
+    </div>`;
+  }
+  const confirmP = parseHvConfirm(raw);
+  if (confirmP.confirm) {
+    let resolved = m.confirmResolved;
+    if (!resolved) {
+      const nextUser = state.messages.slice(idx + 1).find((x) => x.role === 'user');
+      if (nextUser) {
+        const t = (nextUser.content ?? '').trim();
+        if (t === '[hv-confirm:generate]') resolved = '✓ 开始生成';
+        else if (t === '[hv-confirm:edit]') resolved = '✏️ 改一下';
+      }
+    }
+    const confirmHtml = renderConfirmCard(confirmP.confirm, resolved, idx);
+    return `<div class="msg assistant">
+      <div class="role">${esc(m.agent ?? 'agent')}</div>
+      <div class="body">${md(confirmP.prose)}${confirmHtml}</div>
+    </div>`;
+  }
+  // Default: hv-options + prose
+  const { prose, options } = parseHvOptions(raw);
   // m.pickedOption is in-memory only — wiped on reload. Recover it from
   // history: any user turn AFTER this card is implicitly the answer.
   let picked = m.pickedOption;
@@ -530,6 +639,131 @@ function parseHvOptions(text) {
     return { prose: text, options: null };
   }
   return { prose, options: parsed };
+}
+
+// === hv-form block parsing ===
+// Multi-field input card. Schema:
+//   ```hv-form
+//   {
+//     "title": "讲一下你想做的视频…",
+//     "fields": [
+//       { "key": "topic",     "label": "主题 / who-what",   "kind": "text",     "required": true },
+//       { "key": "headline",  "label": "Headline",          "kind": "text",     "required": true },
+//       { "key": "data",      "label": "关键数字 / 数据",   "kind": "textarea" },
+//       { "key": "aspect",    "label": "尺寸",              "kind": "select",   "options": ["16:9","9:16","1:1","4:5"], "default": "16:9" },
+//       { "key": "duration",  "label": "时长(秒)",          "kind": "select",   "options": ["3","5","10","15","30"], "default": "5" },
+//       { "key": "frame_count","label": "帧数 / 画面数",    "kind": "text",     "default": "1" },
+//       { "key": "style",     "label": "风格描述",          "kind": "textarea" }
+//     ],
+//     "allow_attachments": true
+//   }
+function parseHvForm(text) {
+  const m = /```hv-form\s*\n([\s\S]*?)```/i.exec(text);
+  if (!m) return { prose: text, form: null };
+  const prose = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
+  let parsed;
+  try { parsed = JSON.parse(m[1].trim()); }
+  catch { return { prose: text, form: null }; }
+  if (!parsed || !Array.isArray(parsed.fields) || parsed.fields.length === 0) {
+    return { prose: text, form: null };
+  }
+  return { prose, form: parsed };
+}
+
+// === hv-confirm block parsing ===
+//   ```hv-confirm
+//   {
+//     "title": "按这些信息开始生成？",
+//     "summary": [{ "label": "主题", "value": "nexu-io" }, ...],
+//     "actions": ["generate","edit"]   // optional, defaults to both
+//   }
+function parseHvConfirm(text) {
+  const m = /```hv-confirm\s*\n([\s\S]*?)```/i.exec(text);
+  if (!m) return { prose: text, confirm: null };
+  const prose = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
+  let parsed;
+  try { parsed = JSON.parse(m[1].trim()); }
+  catch { return { prose: text, confirm: null }; }
+  if (!parsed || !Array.isArray(parsed.summary)) {
+    return { prose: text, confirm: null };
+  }
+  return { prose, confirm: parsed };
+}
+
+// === hv-form render ===
+function renderFormCard(form, submitted, msgIdx) {
+  const title = form.title || 'Tell me a bit more…';
+  const fields = form.fields || [];
+  const allowAttachments = form.allow_attachments !== false;
+  const fieldsHtml = fields.map((f, i) => {
+    const key = f.key || `field_${i}`;
+    const label = f.label || key;
+    const ph = f.placeholder || '';
+    const required = f.required ? '<span class="req">*</span>' : '';
+    const def = (submitted && submitted[key] !== undefined ? submitted[key] : (f.default ?? ''));
+    const dis = submitted ? 'disabled' : '';
+    let control;
+    if (f.kind === 'textarea') {
+      control = `<textarea data-form-msg="${msgIdx}" data-form-key="${esc(key)}" rows="2" placeholder="${esc(ph)}" ${dis}>${esc(def)}</textarea>`;
+    } else if (f.kind === 'select') {
+      const opts = (f.options || []).map((o) => {
+        const v = typeof o === 'string' ? o : o.value;
+        const lbl = typeof o === 'string' ? o : (o.label || o.value);
+        const sel = String(v) === String(def) ? 'selected' : '';
+        return `<option value="${esc(v)}" ${sel}>${esc(lbl)}</option>`;
+      }).join('');
+      control = `<select data-form-msg="${msgIdx}" data-form-key="${esc(key)}" ${dis}>${opts}</select>`;
+    } else {
+      control = `<input type="text" data-form-msg="${msgIdx}" data-form-key="${esc(key)}" placeholder="${esc(ph)}" value="${esc(def)}" ${dis} />`;
+    }
+    return `<div class="form-field">
+      <label>${esc(label)}${required}</label>
+      ${control}
+    </div>`;
+  }).join('');
+  const dropHtml = allowAttachments && !submitted ? `
+    <div class="form-attachments" data-form-msg="${msgIdx}">
+      <div class="form-drop-hint">📎 拖拽 / 粘贴 / 选择文件作为素材（logo、截图、数据 CSV…可选）</div>
+      <div class="form-attachment-list" id="form-att-${msgIdx}"></div>
+      <input type="file" id="form-file-${msgIdx}" multiple style="display:none" />
+      <button type="button" class="form-attach-btn" data-form-msg="${msgIdx}">+ 添加文件</button>
+    </div>` : '';
+  const actionsHtml = submitted ? '' : `
+    <div class="form-actions">
+      <button class="form-submit" data-form-msg="${msgIdx}">提交 ↵</button>
+    </div>`;
+  return `<div class="form-card${submitted ? ' submitted' : ''}">
+    <div class="form-title">${esc(title)}</div>
+    <div class="form-fields">${fieldsHtml}</div>
+    ${dropHtml}
+    ${actionsHtml}
+  </div>`;
+}
+
+// === hv-confirm render ===
+function renderConfirmCard(confirm, resolved, msgIdx) {
+  const title = confirm.title || 'Looks right?';
+  const summary = confirm.summary || [];
+  const actions = confirm.actions || ['generate', 'edit'];
+  const summaryHtml = summary.map((s) => {
+    const label = s.label || s.key || '';
+    const value = s.value !== undefined ? String(s.value) : '';
+    return `<div class="confirm-row">
+      <div class="confirm-label">${esc(label)}</div>
+      <div class="confirm-value">${esc(value) || '<span class="muted">—</span>'}</div>
+    </div>`;
+  }).join('');
+  const actionsHtml = resolved ? '' : `
+    <div class="confirm-actions">
+      ${actions.includes('generate') ? `<button class="confirm-go" data-confirm-msg="${msgIdx}" data-action="generate">✓ 开始生成</button>` : ''}
+      ${actions.includes('edit') ? `<button class="confirm-edit" data-confirm-msg="${msgIdx}" data-action="edit">✏️ 修改</button>` : ''}
+    </div>`;
+  return `<div class="confirm-card${resolved ? ' resolved' : ''}">
+    <div class="confirm-title">${esc(title)}</div>
+    <div class="confirm-summary">${summaryHtml}</div>
+    ${actionsHtml}
+    ${resolved ? `<div class="confirm-resolved-mark">${esc(resolved)}</div>` : ''}
+  </div>`;
 }
 
 function renderOptionCard(opts, picked, msgIdx) {

@@ -212,6 +212,83 @@
   .opt-card .freeform-input .freeform-send:disabled { opacity: .4;
     cursor: not-allowed; }
 
+  /* ===== hv-form (multi-field input card) ===== */
+  .form-card { margin-top: 8px; background: var(--bg-subtle);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 14px 12px; }
+  .form-card.submitted { opacity: .65; }
+  .form-card .form-title { font-size: 13.5px; font-weight: 500;
+    margin-bottom: 12px; color: var(--text); }
+  .form-card .form-fields { display: flex; flex-direction: column; gap: 10px; }
+  .form-card .form-field { display: flex; flex-direction: column; gap: 4px; }
+  .form-card .form-field label { font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .08em; color: var(--text-muted); text-transform: uppercase;
+    display: flex; align-items: center; gap: 4px; }
+  .form-card .form-field label .req { color: var(--accent); margin-left: 2px; }
+  .form-card .form-field input,
+  .form-card .form-field textarea,
+  .form-card .form-field select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 10px; border-radius: var(--radius-sm); font-size: 13px;
+    font-family: var(--font-sans); outline: none; line-height: 1.55;
+    width: 100%; }
+  .form-card .form-field textarea { resize: vertical; min-height: 38px; }
+  .form-card .form-field input:focus,
+  .form-card .form-field textarea:focus,
+  .form-card .form-field select:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .form-card .form-field input:disabled,
+  .form-card .form-field textarea:disabled,
+  .form-card .form-field select:disabled { opacity: .7; cursor: not-allowed; }
+  .form-card .form-attachments { margin-top: 12px; padding-top: 10px;
+    border-top: 1px dashed var(--border); }
+  .form-card .form-drop-hint { font-size: 11.5px; color: var(--text-muted);
+    margin-bottom: 6px; }
+  .form-card .form-attach-btn { background: var(--bg);
+    border: 1px solid var(--border); color: var(--text); padding: 5px 10px;
+    border-radius: var(--radius-sm); cursor: pointer; font-size: 11.5px;
+    font-family: var(--font-mono); }
+  .form-card .form-attach-btn:hover { border-color: var(--accent); }
+  .form-card .form-actions { margin-top: 14px; display: flex;
+    justify-content: flex-end; }
+  .form-card .form-submit { background: var(--accent); color: var(--accent-fg);
+    border: 0; padding: 7px 16px; border-radius: var(--radius-sm);
+    cursor: pointer; font-size: 12.5px; font-weight: 500;
+    box-shadow: 0 4px 10px rgba(201, 100, 66, .18); }
+  .form-card .form-submit:hover { background: var(--accent-hover); }
+
+  /* ===== hv-confirm (start-or-edit card) ===== */
+  .confirm-card { margin-top: 8px; background: var(--bg-subtle);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; }
+  .confirm-card.resolved { opacity: .7; }
+  .confirm-card .confirm-title { font-size: 13.5px; font-weight: 500;
+    margin-bottom: 10px; }
+  .confirm-card .confirm-summary { display: flex; flex-direction: column;
+    gap: 4px; padding: 10px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    margin-bottom: 12px; }
+  .confirm-card .confirm-row { display: grid;
+    grid-template-columns: minmax(80px, max-content) 1fr; gap: 12px;
+    font-size: 12px; line-height: 1.55; align-items: baseline; }
+  .confirm-card .confirm-label { font-family: var(--font-mono);
+    color: var(--text-muted); letter-spacing: .04em; }
+  .confirm-card .confirm-value { color: var(--text); word-break: break-word; }
+  .confirm-card .confirm-value .muted { color: var(--text-faint); font-style: italic; }
+  .confirm-card .confirm-actions { display: flex; gap: 8px; }
+  .confirm-card .confirm-go { background: var(--accent); color: var(--accent-fg);
+    border: 0; padding: 7px 14px; border-radius: var(--radius-sm);
+    cursor: pointer; font-size: 12.5px; font-weight: 500; flex: 1;
+    box-shadow: 0 4px 10px rgba(201, 100, 66, .18); }
+  .confirm-card .confirm-go:hover { background: var(--accent-hover); }
+  .confirm-card .confirm-edit { background: var(--bg);
+    border: 1px solid var(--border); color: var(--text);
+    padding: 7px 14px; border-radius: var(--radius-sm); cursor: pointer;
+    font-size: 12.5px; }
+  .confirm-card .confirm-edit:hover { border-color: var(--accent); }
+  .confirm-card .confirm-resolved-mark { margin-top: 8px;
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--accent); }
+
   .msg.system { align-self: center; font-size: 11px; color: var(--text-faint);
     font-family: var(--font-mono); }
   .msg.preview-event { align-self: center; background: var(--green-bg); color: var(--green);
