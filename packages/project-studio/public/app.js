@@ -73,6 +73,20 @@ function defaultProjectName(seed) {
   return `Untitled ${String(n).padStart(2, '0')}`;
 }
 
+/**
+ * Format a percent value for inline progress UI.
+ *  - integer pcts stay integer ("56" → "56")
+ *  - fractional pcts truncate to 1 decimal place ("98.333…" → "98.3")
+ * Avoids the JS-default "98.33333333334%" tail when sources publish
+ * (frame_index + sub_pct/100) / total style fractions.
+ */
+function formatPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0';
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(1);
+}
+
 async function createDefaultProject() {
   const r = await API.createProject({ name: defaultProjectName(0) });
   if (!r?.project) {
@@ -373,7 +387,7 @@ function renderToolbar() {
   exportBtn.disabled = !p || (!p.templateId && !hasFrames) || !!state.exporting;
   if (state.exporting) {
     exportBtn.textContent = state.exportProgress
-      ? `⏵ ${state.exportProgress.pct}% · ${state.exportProgress.stage}`
+      ? `⏵ ${formatPct(state.exportProgress.pct)}% · ${state.exportProgress.stage}`
       : '⏵ Exporting…';
   } else {
     exportBtn.textContent = 'Export MP4';
