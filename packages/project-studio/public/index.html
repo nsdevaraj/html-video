@@ -82,12 +82,17 @@
     font-family: var(--font-mono); }
   /* "Sign in" button sits inside a disabled agent item (AMR-needs-login) but
      must stay clickable + full-opacity. */
-  .agent-menu .agent-menu-item .mi-login { font-size: 10px; padding: 3px 9px; border-radius: 999px;
-    background: var(--accent); color: var(--accent-fg); cursor: pointer; display: inline-flex;
-    align-items: center; pointer-events: auto; opacity: 1; flex: 0 0 auto; user-select: none; }
-  .agent-menu .agent-menu-item:disabled .mi-login { opacity: 1; }
-  .agent-menu .agent-menu-item .mi-login:hover { background: var(--accent-hover); }
-  .agent-menu .agent-menu-item .mi-login.busy { opacity: .6; cursor: wait; }
+  .agent-menu .agent-menu-item .mi-login { font-size: 11px; font-weight: 600; padding: 4px 13px;
+    border-radius: 7px; background: var(--accent); color: var(--accent-fg); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px; pointer-events: auto; opacity: 1;
+    flex: 0 0 auto; user-select: none; border: 0; transition: filter .12s, transform .08s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.18); }
+  .agent-menu .agent-menu-item .mi-login::before { content: '→'; font-weight: 700; }
+  .agent-menu .agent-menu-item .mi-login:hover { filter: brightness(1.08); }
+  .agent-menu .agent-menu-item .mi-login:active { transform: translateY(1px); }
+  .agent-menu .agent-menu-item .mi-login.busy { opacity: .6; cursor: wait; box-shadow: none; }
+  /* The needs-login row itself shouldn't look fully greyed — the action is live */
+  .agent-menu .agent-menu-item.is-unselectable:has(.mi-login) { opacity: .85; cursor: default; }
   .toolbar select { background: var(--bg); border: 1px solid var(--border);
     color: var(--text); padding: 6px 10px; border-radius: var(--radius-sm);
     font-size: 12.5px; cursor: pointer; min-width: 160px; }

@@ -14,7 +14,11 @@ import type { AgentDef } from './types.js';
  * `claude --print` CLI has a non-deterministic 1-byte-empty-reply mode on
  * long creative outputs (verified 2026-05-28). Direct API doesn't.
  */
-export const AGENT_DEFS: AgentDef[] = [anthropicApi, claude, cursorAgent, codex, hermes, amr];
+// AMR first — it's the recommended option (one login, many models, lower cost),
+// so it leads the picker. Default SELECTION still falls back to the first
+// *available* agent (see studio currentId logic), so an un-logged-in AMR up top
+// won't strand a new project without a working agent.
+export const AGENT_DEFS: AgentDef[] = [amr, anthropicApi, claude, cursorAgent, codex, hermes];
 
 export function findAgent(id: string): AgentDef | undefined {
   return AGENT_DEFS.find((a) => a.id === id);

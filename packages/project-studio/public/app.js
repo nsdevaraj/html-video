@@ -2541,6 +2541,7 @@ const AGENT_LOGOS = {
   'cursor-agent': '/agent-icons/cursor-agent.svg',
   'codex': '/agent-icons/codex.svg',
   'hermes': '/agent-icons/hermes.svg',
+  'amr': '/agent-icons/amr.svg',
 };
 const AGENT_ICON_FALLBACK = {
   'anthropic-api': '☁️',

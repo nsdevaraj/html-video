@@ -46,6 +46,10 @@ export interface AgentDef {
    * `resolvedBin` is the path that detection settled on (PATH or a fallback).
    */
   extraDetect?: (resolvedBin: string) => Promise<{ available: boolean; version?: string | null; hint?: string }>;
+  /** Default model id for ACP agents that REQUIRE session/set_model before
+   * session/prompt (AMR rejects a missing model). The ACP client sends this via
+   * set_model when the caller doesn't specify one. */
+  defaultModel?: string;
   /** Extra fixed env vars on spawn */
   env?: Record<string, string>;
   /** Where to find install instructions */
