@@ -629,8 +629,12 @@ function renderMain() {
             <span class="grow"></span>
             <button class="reload-btn" id="btn-reload">${t('preview.reload')}</button>
           </div>
-          <details class="soundtrack-panel" id="soundtrack-panel" open>
-            <summary>${t('soundtrack.title')} <span class="soundtrack-badge">${t('soundtrack.optional')}</span></summary>
+          <details class="soundtrack-panel" id="soundtrack-panel">
+            <summary>
+              <span class="st-summary-main">${t('soundtrack.title')}</span>
+              <span class="st-summary-sub">${t('soundtrack.summary_sub')}</span>
+              <span class="soundtrack-badge">${t('soundtrack.optional')}</span>
+            </summary>
             <div class="soundtrack-body">
               <p class="soundtrack-hint">${t('soundtrack.hint')}</p>
               <label class="soundtrack-field">
@@ -654,6 +658,7 @@ function renderMain() {
                   <select id="st-narration-voice" class="st-voice-select">
                     ${NARRATION_VOICES.map((v) => `<option value="${v.voiceId}">${t('soundtrack.voice_' + v.key)}</option>`).join('')}
                   </select>
+                  <button type="button" class="st-fit" id="btn-st-fit" title="${t('soundtrack.fit_hint')}">${t('soundtrack.fit_durations')}</button>
                 </div>
               </label>
               <div class="soundtrack-vols">
@@ -820,6 +825,37 @@ function wireSoundtrackPanel() {
   }
   if (draftFrameBtn) draftFrameBtn.onclick = () => draftNarration(currentFrameId());
   if (draftAllBtn) draftAllBtn.onclick = () => draftNarration(null);
+
+  // "Fit to narration": re-pace each frame's duration by its narration length.
+  const fitBtn = document.getElementById('btn-st-fit');
+  if (fitBtn) {
+    const anyNarration = () => Object.values(state._narrationByFrame || {}).some((v) => (v || '').trim());
+    fitBtn.disabled = !hasFrames || !anyNarration();
+    fitBtn.onclick = async () => {
+      if (!state.selected || !anyNarration()) return;
+      const label = fitBtn.textContent;
+      fitBtn.disabled = true; fitBtn.textContent = t('soundtrack.fitting');
+      try {
+        const res = await fetch(`/api/projects/${state.selected.id}/fit-durations`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ narrationByFrame: state._narrationByFrame }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          toast(t('soundtrack.fitted', { sec: data.totalSec }), 'success');
+          // Refresh frames so the strip + preview reflect the new per-frame durations.
+          if (typeof renderPreview === 'function') renderPreview();
+          if (typeof renderFramesStrip === 'function') renderFramesStrip();
+        } else {
+          toast(data.error || t('soundtrack.fit_failed'), 'error');
+        }
+      } catch (e) {
+        toast(`${e?.message ?? e}`, 'error');
+      } finally {
+        fitBtn.textContent = label; fitBtn.disabled = !anyNarration();
+      }
+    };
+  }
 
   // Restore previously generated soundtrack (music prompt + audio previews).
   const st = state.selected?.soundtrack;

@@ -1039,6 +1039,45 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         return json(res, 200, { graph });
       }
 
+      // Re-pace each frame's duration to match the narration: split the total
+      // duration across frames in proportion to each frame's narration length
+      // (a frame with twice the words holds twice as long), so a generated
+      // voiceover and the visuals stay in step. Min 2s per frame.
+      const fitMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/fit-durations$/);
+      if (fitMatch && fitMatch[1] && m === 'POST') {
+        const projectId = fitMatch[1];
+        const graph = await ctx.orchestrator.readContentGraph(projectId);
+        if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length === 0) {
+          return json(res, 400, { error: 'No frames yet — generate the video first.' });
+        }
+        const byFrame = ((await readBody(req)) as { narrationByFrame?: Record<string, string> }).narrationByFrame ?? {};
+        const lenOf = (id: string) => (byFrame[id]?.trim().length ?? 0);
+        const totalChars = graph.nodes.reduce((s, n) => s + lenOf(n.id), 0);
+        if (totalChars === 0) {
+          return json(res, 400, { error: 'No narration yet — draft narration first, then fit.' });
+        }
+        const MIN = 2;
+        // Keep total duration, but if there isn't enough to give every frame the
+        // minimum at its char-share, scale the total up so MIN is always honored
+        // (≈0.18s of speech per character is a comfortable narration pace).
+        const SEC_PER_CHAR = 0.18;
+        const currentTotal = graph.nodes.reduce((s, n) => s + (n.durationSec ?? MIN), 0);
+        const neededForSpeech = Math.ceil(totalChars * SEC_PER_CHAR);
+        const total = Math.max(currentTotal, neededForSpeech, MIN * graph.nodes.length);
+        // Proportional by char share, then lift any frame below MIN.
+        let durs = graph.nodes.map((n) => ({ n, d: Math.max(MIN, Math.round((lenOf(n.id) / totalChars) * total)) }));
+        // Re-normalize so the rounded sum matches `total` (adjust the longest frame).
+        const sum = durs.reduce((s, x) => s + x.d, 0);
+        if (sum !== total && durs.length) {
+          const longest = durs.reduce((a, b) => (b.d > a.d ? b : a));
+          longest.d = Math.max(MIN, longest.d + (total - sum));
+        }
+        for (const { n, d } of durs) n.durationSec = d;
+        await ctx.orchestrator.writeContentGraph(projectId, graph);
+        const durations = Object.fromEntries(graph.nodes.map((n) => [n.id, n.durationSec]));
+        return json(res, 200, { ok: true, durations, totalSec: graph.nodes.reduce((s, n) => s + (n.durationSec ?? 0), 0) });
+      }
+
       // ============== File serving ==============
 
       // Project preview HTML (and any sibling files like assets/)

@@ -754,13 +754,25 @@
   /* ===== Soundtrack panel ===== */
   .soundtrack-panel { border-top: 1px solid var(--border); background: var(--bg-panel);
     max-height: 42vh; overflow-y: auto; }
-  .soundtrack-panel > summary { padding: 10px 22px; cursor: pointer; font-size: 12px;
-    font-weight: 500; color: var(--text); user-select: none; list-style: none; }
+  /* Prominent, clearly-clickable collapsed bar (collapsed by default so it
+     never crowds the preview). */
+  .soundtrack-panel > summary { padding: 13px 22px; cursor: pointer; font-size: 13px;
+    font-weight: 600; color: var(--text); user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--accent-soft); border: 1px dashed var(--accent);
+    border-radius: var(--radius-sm); margin: 8px 16px; transition: background .12s, box-shadow .12s; }
   .soundtrack-panel > summary::-webkit-details-marker { display: none; }
-  .soundtrack-panel > summary::before { content: '▸'; display: inline-block;
-    margin-right: 8px; color: var(--text-muted); transition: transform .15s; }
-  .soundtrack-panel[open] > summary::before { transform: rotate(90deg); }
-  .soundtrack-panel > summary:hover { background: var(--bg); }
+  .soundtrack-panel > summary::after { content: '⌄'; margin-left: auto; font-size: 15px;
+    color: var(--accent); transition: transform .15s; flex: 0 0 auto; }
+  .soundtrack-panel[open] > summary::after { transform: rotate(180deg); }
+  .soundtrack-panel[open] > summary { border-style: solid; }
+  .soundtrack-panel > summary:hover { background: var(--accent); }
+  .soundtrack-panel > summary:hover .st-summary-main,
+  .soundtrack-panel > summary:hover .st-summary-sub { color: var(--accent-fg); }
+  .soundtrack-panel > summary:hover::after { color: var(--accent-fg); }
+  .st-summary-main { flex: 0 0 auto; }
+  .st-summary-sub { font-size: 11px; font-weight: 400; color: var(--text-muted); flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .soundtrack-badge { font-size: 10px; font-weight: 600; text-transform: uppercase;
     letter-spacing: .05em; color: var(--text-muted); border: 1px solid var(--border);
     border-radius: 999px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; }
@@ -777,6 +789,11 @@
   .st-voice-select { font-size: 11px; padding: 3px 8px; border-radius: var(--radius-sm);
     background: var(--bg); border: 1px solid var(--border); color: var(--text); cursor: pointer; }
   .st-voice-select:focus { outline: none; border-color: var(--accent); }
+  .st-fit { font-size: 11px; padding: 3px 10px; border-radius: var(--radius-sm); cursor: pointer;
+    background: var(--bg); border: 1px solid var(--accent); color: var(--accent); margin-left: auto;
+    transition: all .12s; }
+  .st-fit:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
+  .st-fit:disabled { opacity: .4; cursor: not-allowed; border-color: var(--border); color: var(--text-muted); }
   /* narration field header with inline draft buttons */
   .st-field-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .st-draft-group { display: inline-flex; gap: 6px; }
