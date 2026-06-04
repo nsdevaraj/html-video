@@ -213,6 +213,7 @@ export class ProjectOrchestrator {
   async writeContentGraph(
     projectId: string,
     graph: ContentGraph,
+    opts: { preserveFrames?: boolean } = {},
   ): Promise<{ project: Project; graphPath: string }> {
     const result = validateGraph(graph);
     if (!result.ok) {
@@ -228,11 +229,21 @@ export class ProjectOrchestrator {
     const graphPath = join(projectDir, 'content-graph.json');
     await writeFile(graphPath, JSON.stringify(graph, null, 2), 'utf8');
     project.contentGraphPath = graphPath;
-    // Reset frames; agent will re-emit per-frame HTML in the second round.
-    project.frames = [];
-    // Ensure frames dir exists for the next step.
     await mkdir(join(projectDir, 'frames'), { recursive: true });
-    if (project.status !== 'rendered') project.status = 'draft';
+    if (opts.preserveFrames) {
+      // Editing an existing storyboard's metadata (e.g. re-pacing durations) —
+      // keep the rendered frames, just sync each frame's durationSec from the
+      // graph so export uses the new timing.
+      const byId = new Map(graph.nodes.map((n) => [n.id, n.durationSec]));
+      project.frames = (project.frames ?? []).map((f) => ({
+        ...f,
+        durationSec: byId.get(f.graphNodeId) ?? f.durationSec,
+      }));
+    } else {
+      // Fresh graph → agent will re-emit per-frame HTML; drop stale frames.
+      project.frames = [];
+      if (project.status !== 'rendered') project.status = 'draft';
+    }
     await this.deps.projects.save(project);
     return { project, graphPath };
   }

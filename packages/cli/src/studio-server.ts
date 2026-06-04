@@ -1078,7 +1078,10 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
           longest.d = Math.max(MIN, longest.d + (total - sum));
         }
         for (const { n, d } of durs) n.durationSec = d;
-        await ctx.orchestrator.writeContentGraph(projectId, graph);
+        // preserveFrames: fit only re-times an EXISTING storyboard — must not
+        // wipe the rendered frames (that left export with no frames → it fell
+        // back to a single 5s template still instead of the multi-frame video).
+        await ctx.orchestrator.writeContentGraph(projectId, graph, { preserveFrames: true });
         const durations = Object.fromEntries(graph.nodes.map((n) => [n.id, n.durationSec]));
         return json(res, 200, { ok: true, durations, totalSec: graph.nodes.reduce((s, n) => s + (n.durationSec ?? 0), 0) });
       }
