@@ -6,10 +6,15 @@ import type { AgentDef, DetectedAgent } from './types.js';
 
 const exec = promisify(execFile);
 
+// Windows has no `which`; it ships `where.exe`. POSIX shells have `which`.
+// `where` can emit multiple lines (one per PATHEXT match) — take the first.
+const WHICH_CMD = process.platform === 'win32' ? 'where' : 'which';
+
 async function which(bin: string): Promise<string | null> {
   try {
-    const { stdout } = await exec('which', [bin], { timeout: 2000 });
-    return stdout.trim() || null;
+    const { stdout } = await exec(WHICH_CMD, [bin], { timeout: 2000 });
+    const first = stdout.trim().split(/\r?\n/)[0]?.trim();
+    return first || null;
   } catch {
     return null;
   }
