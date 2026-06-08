@@ -63,8 +63,27 @@ export const DataRollup: React.FC<DataRollupProps> = (props) => {
   const foreground = props.foreground ?? DEFAULTS.foreground;
   const unit = data.unit ?? '';
 
-  // Largest value defines the 100%-height bar; everything scales against it.
-  const maxValue = Math.max(1, ...items.map((it) => (Number.isFinite(it.value) ? it.value : 0)));
+  // Bar-height scaling. Normally each bar is linear against the largest value.
+  // But when one value dwarfs the rest (e.g. 61,059 stars next to 142 systems),
+  // linear scaling crushes the small bars to a 2px sliver. So if the spread is
+  // extreme (max ≥ 50× the smallest positive value), switch to a log scale so
+  // every bar stays legible. The rolled NUMBERS always show the true value —
+  // only the bar HEIGHT is remapped.
+  const values = items.map((it) => (Number.isFinite(it.value) ? it.value : 0));
+  const maxValue = Math.max(1, ...values);
+  const positives = values.filter((v) => v > 0);
+  const minPositive = positives.length > 0 ? Math.min(...positives) : maxValue;
+  const useLog = minPositive > 0 && maxValue / minPositive >= 50;
+  // Map a raw value → 0..1 fraction of the tallest bar.
+  const heightFrac = (value: number): number => {
+    if (value <= 0) return 0;
+    if (!useLog) return value / maxValue;
+    // Log scale: smallest positive bar reads ~25% tall, the tallest 100%.
+    const logMin = Math.log(minPositive);
+    const logMax = Math.log(maxValue);
+    const t = (Math.log(value) - logMin) / (logMax - logMin || 1);
+    return 0.25 + t * 0.75;
+  };
 
   // Title fades + slides up over the first ~0.5s.
   const titleProgress = spring({ frame, fps, config: { damping: 200 } });
@@ -109,7 +128,7 @@ export const DataRollup: React.FC<DataRollupProps> = (props) => {
           fps,
           config: { damping: 14, mass: 0.7, stiffness: 90 },
         });
-        const barHeight = Math.max(2, (value / maxValue) * chartHeight * grow);
+        const barHeight = Math.max(2, heightFrac(value) * chartHeight * grow);
 
         // The number rolls from 0 → value tracking the same growth curve, so the
         // figure and the bar finish together.
@@ -136,7 +155,7 @@ export const DataRollup: React.FC<DataRollupProps> = (props) => {
               }}
             >
               {fmt(rolled)}
-              {unit}
+              {unit ? ` ${unit}` : ''}
             </div>
 
             {/* the bar */}

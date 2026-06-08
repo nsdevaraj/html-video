@@ -744,9 +744,10 @@
   .preview-frame { aspect-ratio: 16/9; background: #000; border-radius: var(--radius);
     overflow: hidden; box-shadow: var(--shadow-md); width: 100%; max-width: 1280px;
     position: relative; }
-  /* iframe renders at the design's native pixel size (set inline) and is scaled
-     down with a CSS variable so cropped layouts stay visually intact. */
-  .preview-frame iframe { position: absolute; top: 0; left: 0; border: 0;
+  /* iframe / native-frame <video> render at the design's native pixel size (set
+     inline) and are scaled down with a CSS variable so the full frame stays
+     visible instead of overflowing the box (Remotion frames are 1920×1080). */
+  .preview-frame iframe, .preview-frame video { position: absolute; top: 0; left: 0; border: 0;
     transform: scale(var(--preview-scale, 1));
     transform-origin: top left; }
   .preview-frame .stamp { position: absolute; bottom: 12px; right: 14px;

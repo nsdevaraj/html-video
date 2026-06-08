@@ -2121,10 +2121,12 @@ function attachPreviewScaler() {
   const apply = () => {
     const w = frame.clientWidth;
     if (!w) return;
-    // Scale by the iframe's native design width (not a hardcoded 1920) so
-    // non-16:9 aspects (1080-wide) shrink correctly too.
-    const ifr = frame.querySelector('iframe');
-    const nativeW = ifr ? (parseFloat(ifr.style.width) || 1920) : 1920;
+    // Scale by the inner element's native design width (not a hardcoded 1920)
+    // so non-16:9 aspects (1080-wide) shrink correctly too. A native (enhanced)
+    // frame uses a <video> instead of an <iframe> — scale it the same way, else
+    // the 1920×1080 MP4 overflows and the frame gets cropped.
+    const inner = frame.querySelector('iframe, video');
+    const nativeW = inner ? (parseFloat(inner.style.width) || 1920) : 1920;
     frame.style.setProperty('--preview-scale', (w / nativeW).toFixed(4));
   };
   apply();
@@ -2572,6 +2574,16 @@ async function sendMessage() {
             if (frameCount > 0) state.activeFrameId = null;
             const pr = await API.getProject(state.selected.id);
             state.selected = pr.project;
+            // Generating in-place writes a fresh content-graph, so the node→kind
+            // map must be rebuilt — otherwise data frames don't get their ⚡
+            // Remotion badge until the user switches projects and back.
+            if (frameCount > 0) {
+              state.frameKinds = {};
+              try {
+                const cg = await API.contentGraph(state.selected.id);
+                if (cg?.graph?.nodes) for (const n of cg.graph.nodes) state.frameKinds[n.id] = n.kind;
+              } catch { /* no graph — single-frame, fine */ }
+            }
             renderPreview(); // also re-syncs soundtrack buttons via __hvSyncNarration
             await refreshTextFields();
             renderToolbar();

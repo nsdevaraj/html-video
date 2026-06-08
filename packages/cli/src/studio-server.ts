@@ -2636,7 +2636,7 @@ function buildHtmlGenerationPrompt(args: BuildPromptArgs): string {
               // bars grow) instead of static hyperframes HTML. Default OFF —
               // Remotion is a user-chosen enhancement, the AI never flips it.
               {
-                key: 'remotion_enhance', label: '⚡ 数据帧动效', kind: 'buttons', required: false,
+                key: 'remotion_enhance', label: '⚡ 数据帧用 Remotion', kind: 'buttons', required: false,
                 default: '关',
                 hint: '数据帧用原生 Remotion 渲染（数字滚动 / 柱子生长）；其余帧仍走 Hyperframes',
                 options: [
@@ -3210,9 +3210,11 @@ async function runSplitMultiFrameGenerate(
         durationSec: perFrameDurationSec,
         text: '<headline / subtitle for this frame>',
       };
-      // When native Remotion enhancement is on, show data nodes carrying the
-      // structured items the rollup template animates (numbers roll, bars grow).
-      if (enhanceData && kind === 'data') {
+      // Every data node carries structured items so it can be rendered natively
+      // with Remotion (numbers roll, bars grow) — whether the user opted in now
+      // or enhances the frame later from the strip. A data frame without numbers
+      // is just a text frame.
+      if (kind === 'data') {
         node.data = {
           title: '<short chart title>',
           unit: '<optional unit, e.g. K / % / ★>',
@@ -3233,9 +3235,8 @@ async function runSplitMultiFrameGenerate(
   graphPromptParts.push('```');
   graphPromptParts.push('');
   graphPromptParts.push(`Replace the placeholder text in each node with concrete content from the inputs. Adjust intent to match (single-frame|explainer|data-viz|promo|comparison|other). Keep node ids unique. Do NOT return an empty reply. Do NOT emit any HTML this turn.`);
-  if (enhanceData) {
-    graphPromptParts.push(`NATIVE DATA FRAMES (REQUIRED this run): every \`kind:"data"\` node MUST carry a \`data\` object \`{ title?, unit?, items: [{ label, value }] }\` with at least 2 items and numeric \`value\`s drawn from the inputs/source. These numbers will be animated (rolling counters, growing bars), so they must be real figures, not placeholders. The node's \`text\` still holds the headline. If a frame genuinely has no quantitative data, make it a \`text\` node instead of \`data\`.`);
-  }
+  graphPromptParts.push(`DATA FRAMES: every \`kind:"data"\` node MUST carry a \`data\` object \`{ title?, unit?, items: [{ label, value }] }\` with at least 2 items and numeric \`value\`s drawn from the inputs/source — real figures, not placeholders (they can be animated with rolling counters / growing bars). The node's \`text\` still holds the headline. If a frame genuinely has no quantitative data, make it a \`text\` node instead of \`data\`.`);
+  graphPromptParts.push(`DATA FRAME QUALITY: (1) Items in ONE data frame must be COMPARABLE — the same unit and a similar order of magnitude. Do NOT mix wildly different scales in one chart (e.g. 61,000 GitHub stars next to 142 plugins) — one giant bar makes the rest invisible. If figures have different units or scales, split them across separate data frames, or pick the 2-4 that genuinely compare. (2) \`unit\` is OPTIONAL and only for a real shared unit (e.g. "%", "K", "★", "ms"). If the numbers are plain counts with no meaningful unit, OMIT \`unit\` entirely — never use filler like "count" / "个" / "次".`);
   graphPromptParts.push(`STRICT JSON: the block must be valid JSON. Inside string values do NOT use straight double-quotes ("…") — if you need to quote a term or title, use 「」 or 《》 or single quotes. No trailing commas. No comments.`);
 
   const graphPrompt = graphPromptParts.join('\n');
@@ -3361,13 +3362,21 @@ h1{font-size:8vw;letter-spacing:-.03em;animation:in 1s ease forwards;opacity:0;t
     // 'frame-data-rollup' is the only native template today (TODO: picker).
     if (enhanceData && node.kind === 'data') {
       try {
+        // Two steps, same as the manual enhance endpoint: (1) set the frame's
+        // engine/data, (2) actually RENDER the preview MP4. Without step 2 the
+        // frame is flagged remotion but has no previewMp4Path, so the studio
+        // tries to play a <video> that 404s → black thumbnail + preview.
         await ctx.orchestrator.enhanceFrameNative(projectId, nodeId, 'frame-data-rollup');
-        onProgress(`  ⚡ 第 ${i + 1} 帧设为 Remotion 原生 (数字滚动 / 柱子生长)`);
+        onProgress(`  ⚡ 第 ${i + 1} 帧渲染 Remotion 动效 (数字滚动 / 柱子生长)…`);
+        await ctx.orchestrator.renderFrameNativePreview({ projectId, graphNodeId: nodeId });
         onSse({ type: 'frame_enhanced', node_id: nodeId, order: i });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         process.stderr.write(`[studio:split-generate] proj=${projectId} frame=${nodeId} enhance skipped: ${msg}\n`);
         onProgress(`  ⚠️ 第 ${i + 1} 帧无法用 Remotion 增强（回落静态 HTML）：${msg}`);
+        // Revert the engine flag so the frame falls back to its hyperframes HTML
+        // (the <iframe> path) instead of showing a broken <video>.
+        try { await ctx.orchestrator.unenhanceFrame(projectId, nodeId); } catch { /* ignore */ }
       }
     }
     onProgress(`  ✓ 第 ${i + 1}/${graph.nodes.length} 帧完成 (${nodeId})`);
