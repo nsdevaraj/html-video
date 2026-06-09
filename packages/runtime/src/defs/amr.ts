@@ -92,6 +92,9 @@ export const amr: AgentDef = {
   // ACP stdio runtime: starts a private OpenCode server, talks JSON-RPC.
   buildArgs: () => ['agent', 'run', '--runtime', 'opencode'],
   streamFormat: 'acp-json-rpc',
+  // Identify html-video as the host so the vela CLI tags its command +
+  // model_request analytics with source=html_video (revenue attribution).
+  env: { AMR_CLIENT_SOURCE: 'html_video' },
   installUrl: 'https://open-design.ai',
   // AMR rejects session/prompt until a model is set. Default to deepseek-v4-flash
   // (the "Lower cost / Many models" official pick); overridable per-call later.
