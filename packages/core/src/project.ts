@@ -131,6 +131,92 @@ export class ProjectOrchestrator {
     return { project, asset };
   }
 
+  // ---------------- Clip frames (user-imported MP4) ----------------
+
+  /**
+   * Import an existing MP4 asset as a clip frame in the timeline. The asset
+   * must already exist in the project (uploaded via addFileAsset) and have
+   * `type: 'video'`. The frame is inserted at the end of the current sequence;
+   * its duration is auto-detected from the MP4 via ffprobe. Clip frames are
+   * skipped by the export render loop — the asset MP4 is passed directly to
+   * ffmpeg concat.
+   */
+  async addClipFrame(
+    projectId: string,
+    assetId: string,
+  ): Promise<{ project: Project; frame: FrameRecord }> {
+    const project = await this.deps.projects.load(projectId);
+    const asset = project.assets.find((a) => a.id === assetId);
+    if (!asset) {
+      throw new HtmlVideoError('asset-not-found', `Asset "${assetId}" not found in project`);
+    }
+    if (asset.type !== 'video') {
+      throw new HtmlVideoError(
+        'invalid-input',
+        `Asset "${assetId}" is type "${asset.type}", not "video"`,
+      );
+    }
+    if (!asset.path) {
+      throw new HtmlVideoError('asset-not-found', `Asset "${assetId}" has no file path`);
+    }
+    // Auto-detect duration from the MP4. Falls back to DEFAULT_FRAME_DURATION_SEC.
+    let durationSec = DEFAULT_FRAME_DURATION_SEC;
+    try {
+      durationSec = await getVideoDuration(asset.path);
+    } catch {
+      // ffprobe unavailable or file unparseable — use default.
+    }
+    // Generate a unique graphNodeId for the clip frame. "clip_" prefix avoids
+    // collisions with agent-generated content-graph node ids.
+    const frames = project.frames ?? [];
+    let idx = 0;
+    let nodeId: string;
+    do {
+      nodeId = `clip_${String(idx).padStart(2, '0')}`;
+      idx++;
+    } while (frames.some((f) => f.graphNodeId === nodeId));
+
+    const nextOrder = frames.length > 0 ? Math.max(...frames.map((f) => f.order)) + 1 : 0;
+    const frame: FrameRecord = {
+      graphNodeId: nodeId,
+      htmlPath: asset.path, // clip frames point htmlPath at the asset MP4
+      durationSec,
+      order: nextOrder,
+      clipAssetId: assetId,
+    };
+    project.frames = [...frames, frame];
+    await this.deps.projects.save(project);
+    return { project, frame };
+  }
+
+  /**
+   * Remove a user-imported clip frame from the timeline. Only removes frames
+   * that have `clipAssetId` set — agent-generated frames are protected.
+   * The underlying asset file is NOT deleted (the user may re-add it).
+   */
+  async removeClipFrame(
+    projectId: string,
+    graphNodeId: string,
+  ): Promise<Project> {
+    const project = await this.deps.projects.load(projectId);
+    const frames = project.frames ?? [];
+    const idx = frames.findIndex(
+      (f) => f.graphNodeId === graphNodeId && f.clipAssetId !== undefined,
+    );
+    if (idx === -1) {
+      throw new HtmlVideoError(
+        'invalid-input',
+        `Clip frame "${graphNodeId}" not found (or is not a clip frame)`,
+      );
+    }
+    frames.splice(idx, 1);
+    // Re-number orders so there are no gaps.
+    frames.forEach((f, i) => { f.order = i; });
+    project.frames = frames;
+    await this.deps.projects.save(project);
+    return project;
+  }
+
   async removeAsset(projectId: string, assetId: string): Promise<Project> {
     const project = await this.deps.projects.load(projectId);
     project.assets = project.assets.filter((a) => a.id !== assetId);
@@ -387,11 +473,29 @@ export class ProjectOrchestrator {
       // h264 params (hyperframes' libx264 vs Remotion's encoder), so a stream
       // -c copy concat can stutter/corrupt. Re-encode the join in that case.
       const enginesUsed = new Set(ordered.map((f) => f.engine ?? projectEngine));
-      const reencode = enginesUsed.size > 1;
+      // Force re-encode if any frame is an imported clip — its codec
+      // profile may differ from generated frames.
+      const hasClipFrames = ordered.some((f) => f.clipAssetId !== undefined);
+      const reencode = enginesUsed.size > 1 || hasClipFrames;
 
       for (let i = 0; i < ordered.length; i++) {
         const f = ordered[i]!;
         const frameOut = join(projectDir, 'frames', `${String(i + 1).padStart(2, '0')}.mp4`);
+
+        // Imported MP4 clip: skip adapter rendering — the asset is already a
+        // rendered MP4. Pass its file path directly to ffmpeg concat.
+        if (f.clipAssetId) {
+          const clipAsset = project.assets.find((a) => a.id === f.clipAssetId);
+          if (!clipAsset?.path) {
+            throw new HtmlVideoError('asset-not-found', `Clip asset "${f.clipAssetId}" not found`);
+          }
+          frameMp4s.push(clipAsset.path);
+          if (args.onProgress) {
+            args.onProgress((i + 1) / ordered.length * 100, `frame ${i + 1}/${ordered.length}: clip (imported)`);
+          }
+          continue;
+        }
+
         const { engine: frameEngine, templateRef } = this.resolveFrameTemplateRef(f, projectEngine);
         const adapter = this.deps.engines.get(frameEngine);
         await adapter.render(
@@ -423,10 +527,20 @@ export class ProjectOrchestrator {
         frameMp4s.push(frameOut);
       }
 
-      await concatFramesWithFfmpeg(frameMp4s, outputPath, projectDir, {
-        reencode,
-        fps: project.preferences.fps ?? 60,
-      });
+      // Single clip-only frame: no concat needed — just copy the asset MP4.
+      // Avoids a costly 4K libx264 re-encode for what is already a valid MP4.
+      if (frameMp4s.length === 1 && ordered.length === 1 && ordered[0]!.clipAssetId) {
+        const { copyFile } = await import('node:fs/promises');
+        await copyFile(frameMp4s[0]!, outputPath);
+      } else {
+        // For mixed clip+generated frames, avoid forced fps conversion on clips.
+        // Pass fps=0 to let ffmpeg use the first input's native framerate.
+        const clipFps = hasClipFrames ? 0 : (project.preferences.fps ?? 60);
+        await concatFramesWithFfmpeg(frameMp4s, outputPath, projectDir, {
+          reencode,
+          fps: clipFps,
+        });
+      }
       const totalDur = ordered.reduce((s, f) => s + (f.durationSec || 0), 0);
       await this.applySoundtrack(project, outputPath, totalDur, args.onProgress);
       project.lastOutputMp4Path = outputPath;
@@ -770,6 +884,9 @@ async function concatFramesWithFfmpeg(
     const n = frameMp4s.length;
     const inputs = frameMp4s.flatMap((p) => ['-i', p]);
     const filter = `${frameMp4s.map((_, i) => `[${i}:v]`).join('')}concat=n=${n}:v=1:a=0[v]`;
+    // Only force output framerate when explicitly set (non-zero). For imported
+    // clips, keeping the native fps avoids a costly frame-doubling re-encode.
+    const rateArgs = fps > 0 ? ['-r', String(fps)] : [];
     ffmpegArgs = [
       '-y',
       ...inputs,
@@ -777,7 +894,7 @@ async function concatFramesWithFfmpeg(
       '-map', '[v]',
       '-c:v', 'libx264',
       '-pix_fmt', 'yuv420p',
-      '-r', String(fps),
+      ...rateArgs,
       '-movflags', '+faststart',
       outputPath,
     ];
@@ -924,6 +1041,44 @@ async function muxAudioWithFfmpeg(args: {
 
 /** Append this export to the project's history (newest last, de-duped by path,
  *  capped so it doesn't grow unbounded). */
+/**
+ * Detect the video duration of an MP4 file via ffprobe (bundled with ffmpeg).
+ * Returns seconds as a float. Throws if ffprobe is unavailable or the output
+ * can't be parsed.
+ */
+async function getVideoDuration(filePath: string): Promise<number> {
+  const { execFile } = await import('node:child_process');
+  return new Promise<number>((resolve, reject) => {
+    execFile(
+      'ffprobe',
+      [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'csv=p=0',
+        filePath,
+      ],
+      { timeout: 10_000 },
+      (err, stdout) => {
+        if (err) {
+          reject(
+            new HtmlVideoError(
+              'render-failed',
+              `ffprobe failed on "${filePath}": ${err.message}. Install ffmpeg (brew install ffmpeg).`,
+            ),
+          );
+          return;
+        }
+        const sec = parseFloat(stdout.trim());
+        if (!Number.isFinite(sec) || sec <= 0) {
+          reject(new HtmlVideoError('render-failed', `ffprobe returned invalid duration for "${filePath}": "${stdout.trim()}"`));
+          return;
+        }
+        resolve(sec);
+      },
+    );
+  });
+}
+
 function recordExport(project: Project, outputPath: string): void {
   const list = (project.exports ?? []).filter((e) => e.path !== outputPath);
   list.push({ path: outputPath, filename: basename(outputPath), createdAt: new Date().toISOString() });
