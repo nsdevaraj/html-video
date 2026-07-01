@@ -542,7 +542,32 @@ export class ProjectOrchestrator {
         });
       }
       const totalDur = ordered.reduce((s, f) => s + (f.durationSec || 0), 0);
-      await this.applySoundtrack(project, outputPath, totalDur, args.onProgress);
+
+      // If narration audio was generated and is longer than the video, extend
+      // the last frame so the voiceover isn't cut by -shortest during mux.
+      let effectiveDur = totalDur;
+      const narrAssetId = project.soundtrack?.narrationAssetId;
+      if (narrAssetId) {
+        const narrAsset = project.assets.find((a) => a.id === narrAssetId);
+        if (narrAsset?.path) {
+          try {
+            const audioDur = await getVideoDuration(narrAsset.path);
+            if (audioDur > totalDur) {
+              const extraSec = audioDur - totalDur;
+              const paddedPath = join(projectDir, `output-padded-${stamp}.mp4`);
+              await padVideoEnd(outputPath, paddedPath, extraSec);
+              const { rename } = await import('node:fs/promises');
+              await rename(paddedPath, outputPath);
+              effectiveDur = audioDur;
+              if (args.onProgress) args.onProgress(99, 'extended last frame to match narration');
+            }
+          } catch {
+            // ffprobe failed on the narration asset — just use totalDur.
+          }
+        }
+      }
+
+      await this.applySoundtrack(project, outputPath, effectiveDur, args.onProgress);
       project.lastOutputMp4Path = outputPath;
       recordExport(project, outputPath);
       project.status = 'rendered';
@@ -575,7 +600,43 @@ export class ProjectOrchestrator {
         ...(args.signal !== undefined && { signal: args.signal }),
       },
     );
-    await this.applySoundtrack(project, outputPath, undefined, args.onProgress);
+
+    // Detect rendered video duration, then check if narration is longer.
+    // The single-frame path uses duration='auto' so we don't know the length
+    // until after rendering.
+    let singleFrameDur: number | undefined;
+    try {
+      singleFrameDur = await getVideoDuration(outputPath);
+    } catch {
+      // ffprobe failed — applySoundtrack will use its own defaults.
+    }
+
+    // If narration was generated and is longer than the video, extend the
+    // last frame so the voiceover isn't cut by -shortest during mux.
+    if (singleFrameDur !== undefined) {
+      const narrAssetId = project.soundtrack?.narrationAssetId;
+      if (narrAssetId) {
+        const narrAsset = project.assets.find((a) => a.id === narrAssetId);
+        if (narrAsset?.path) {
+          try {
+            const audioDur = await getVideoDuration(narrAsset.path);
+            if (audioDur > singleFrameDur) {
+              const extraSec = audioDur - singleFrameDur;
+              const paddedPath = join(projectDir, `output-padded-${stamp}.mp4`);
+              await padVideoEnd(outputPath, paddedPath, extraSec);
+              const { rename } = await import('node:fs/promises');
+              await rename(paddedPath, outputPath);
+              singleFrameDur = audioDur;
+              if (args.onProgress) args.onProgress(99, 'extended last frame to match narration');
+            }
+          } catch {
+            // ffprobe failed on narration — fall through.
+          }
+        }
+      }
+    }
+
+    await this.applySoundtrack(project, outputPath, singleFrameDur, args.onProgress);
     project.lastOutputMp4Path = outputPath;
     recordExport(project, outputPath);
     project.status = 'rendered';
@@ -1076,6 +1137,49 @@ async function getVideoDuration(filePath: string): Promise<number> {
         resolve(sec);
       },
     );
+  });
+}
+
+/**
+ * Pad the end of a video by cloning its last frame for `extraSeconds`.
+ * Uses ffmpeg's `tpad` filter (available since FFmpeg 4.2 / 2019).
+ * Re-encodes to libx264; input audio, if any, is dropped (our pipeline
+ * produces silent video — audio is mixed in later via muxAudioWithFfmpeg).
+ */
+async function padVideoEnd(
+  inputPath: string,
+  outputPath: string,
+  extraSeconds: number,
+): Promise<void> {
+  const { spawn } = await import('node:child_process');
+  const args = [
+    '-y',
+    '-i', inputPath,
+    '-vf', `tpad=stop_mode=clone:stop_duration=${extraSeconds.toFixed(2)}`,
+    '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p',
+    '-an',
+    '-movflags', '+faststart',
+    outputPath,
+  ];
+  await new Promise<void>((resolveFn, reject) => {
+    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+    proc.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') {
+        reject(new HtmlVideoError(
+          'render-failed',
+          'ffmpeg not found on PATH. Install with `brew install ffmpeg` (macOS) or your platform equivalent.',
+        ));
+      } else {
+        reject(err);
+      }
+    });
+    proc.on('exit', (code: number | null) => {
+      if (code === 0) resolveFn();
+      else reject(new HtmlVideoError('render-failed', `ffmpeg tpad exited with code ${code}: ${stderr.slice(-2000)}`));
+    });
   });
 }
 
