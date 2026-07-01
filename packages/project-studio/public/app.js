@@ -2154,8 +2154,13 @@ function renderFramesStrip() {
   const p = state.selected;
   const frames = p && Array.isArray(p.frames) ? [...p.frames].sort((a, b) => a.order - b.order) : [];
   if (frames.length === 0) {
-    strip.classList.remove('has-frames');
-    strip.innerHTML = '';
+    // Still show the import-clip button so users can add their first clip
+    // even when there are no generated frames yet.
+    strip.classList.add('has-frames');
+    strip.innerHTML = `<span class="label">${t('frames.label')}</span>
+      <button class="frame-graph-btn" id="btn-import-clip" title="${esc(t('frames.import_clip') || 'Import MP4 clip')}">+🎬 ${esc(t('frames.import_clip') || 'Import MP4 clip')}</button>`;
+    const icbtn = document.getElementById('btn-import-clip');
+    if (icbtn) icbtn.addEventListener('click', importClipAction);
     return;
   }
   strip.classList.add('has-frames');
@@ -2170,17 +2175,19 @@ function renderFramesStrip() {
     const isFocus = f.graphNodeId === state.iterateFocusFrameId;
     const cls = ['frame-tab', isActive && 'active', isFocus && 'focus']
       .filter(Boolean).join(' ');
-    // A native (enhanced) frame has no HTML — play its rendered preview MP4.
-    const enhanced = f.engine === 'remotion';
+    // A native (enhanced) or imported clip frame has no HTML — play its MP4.
+    const isClip = !!f.clipAssetId;
+    const enhanced = f.engine === 'remotion' || isClip;
     const thumbInner = enhanced
       ? `<video src="/preview/${p.id}/frame/${encodeURIComponent(f.graphNodeId)}.mp4?v=${ver}" autoplay muted loop playsinline tabindex="-1"></video>`
       : `<iframe sandbox="allow-scripts" src="/preview/${p.id}/frame/${encodeURIComponent(f.graphNodeId)}?thumb=1&v=${ver}" tabindex="-1" loading="lazy"></iframe>`;
-    // The "⚡ Enhance" control shows only on data frames (kind==='data'). It's an
-    // overlay badge ON the thumbnail (top area) so it's obvious + always visible.
+    // "⚡ Enhance" for data frames; "✕" delete for imported clip frames.
     const isData = state.frameKinds[f.graphNodeId] === 'data';
     const busy = state.enhancing && state.enhancing.nodeId === f.graphNodeId;
     let enhanceCtl = '';
-    if (isData) {
+    if (isClip) {
+      enhanceCtl = `<span class="frame-enhance clip-del" data-fid="${esc(f.graphNodeId)}" data-act="delete-clip" title="${esc(t('frames.clip_delete') || 'Remove clip')}">✕</span>`;
+    } else if (isData) {
       if (busy) {
         enhanceCtl = `<span class="frame-enhance busy" data-fid="${esc(f.graphNodeId)}">${t('frames.enhancing', { pct: state.enhancing.pct ?? 0 })}</span>`;
       } else if (enhanced) {
@@ -2202,7 +2209,8 @@ function renderFramesStrip() {
     </button>`;
   }).join('');
   strip.innerHTML = `<span class="label">${t('frames.label')}</span>${tabs}
-    <button class="frame-graph-btn" id="btn-show-graph">${t('frames.view_graph')}</button>`;
+    <button class="frame-graph-btn" id="btn-show-graph">${t('frames.view_graph')}</button>
+    <button class="frame-graph-btn" id="btn-import-clip" title="${esc(t('frames.import_clip') || 'Import MP4 clip')}">+🎬</button>`;
   // Single-click: switch which frame is shown in the centre preview.
   // Double-click: pin this frame as the iteration target so subsequent
   // chat messages only rewrite this frame. Click another / dbl-click the
@@ -2237,10 +2245,13 @@ function renderFramesStrip() {
       const fid = el.dataset.fid;
       if (el.dataset.act === 'unenhance') unenhanceFrameAction(fid);
       else if (el.dataset.act === 'enhance') startEnhanceStream(fid);
+      else if (el.dataset.act === 'delete-clip') deleteClipFrameAction(fid);
     });
   });
   const gbtn = document.getElementById('btn-show-graph');
   if (gbtn) gbtn.addEventListener('click', openGraphModal);
+  const icbtn = document.getElementById('btn-import-clip');
+  if (icbtn) icbtn.addEventListener('click', importClipAction);
 }
 
 async function openGraphModal() {
@@ -3255,3 +3266,70 @@ init().catch((e) => {
   try { toast(`init 失败：${e.message}`, 'error'); } catch {}
 });
 
+
+
+// ============== clip frame actions ==============
+
+async function importClipAction() {
+  if (!state.selected) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    // Quick client-side reject for non-video
+    if (!file.type.startsWith('video/') && !file.name.match(/\.(mp4|webm|mov)$/i)) {
+      alert(t('frames.clip_bad_type') || 'Please select a video file (MP4, WebM, MOV).');
+      return;
+    }
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const r = await fetch(`/api/projects/${state.selected.id}/clips`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!r.ok) {
+        const { error } = await r.json().catch(() => ({ error: 'Upload failed' }));
+        alert(error || 'Upload failed');
+        return;
+      }
+      const { project } = await r.json();
+      // Merge the returned project into state so the strip refreshes with the new frame.
+      if (state.selected && state.selected.id === project.id) {
+        state.selected = project;
+        state.activeFrameId = null; // let the user click the new frame
+        renderFramesStrip();
+        renderPreview();
+      }
+    } catch (e) {
+      alert(e.message || 'Upload failed');
+    }
+  };
+  input.click();
+}
+
+async function deleteClipFrameAction(fid) {
+  if (!state.selected) return;
+  if (!confirm(t('frames.clip_delete_confirm') || 'Remove this clip from the timeline?')) return;
+  try {
+    const r = await fetch(`/api/projects/${state.selected.id}/clips/${encodeURIComponent(fid)}`, {
+      method: 'DELETE',
+    });
+    if (!r.ok) {
+      const { error } = await r.json().catch(() => ({ error: 'Delete failed' }));
+      alert(error || 'Delete failed');
+      return;
+    }
+    const { project } = await r.json();
+    if (state.selected && state.selected.id === project.id) {
+      state.selected = project;
+      if (state.activeFrameId === fid) state.activeFrameId = null;
+      renderFramesStrip();
+      renderPreview();
+    }
+  } catch (e) {
+    alert(e.message || 'Delete failed');
+  }
+}
