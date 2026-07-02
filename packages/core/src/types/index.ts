@@ -405,6 +405,42 @@ export interface ProjectSoundtrack {
   fadeOutSec?: number;
 }
 
+/**
+ * Per-segment audio status from the pre-export "every clip has audio" check.
+ * A segment counts as having audio when it carries an embedded audio track
+ * (imported clips only), has per-frame narration text, or the project has a
+ * soundtrack (music/narration) that plays across the whole video.
+ */
+export interface FrameAudioStatus {
+  /** graphNodeId of the frame, or 'single' for a single-frame project. */
+  graphNodeId: string;
+  /** 0-based play order. */
+  order: number;
+  /** How this segment is produced. */
+  kind: 'clip' | 'generated';
+  /** Human-readable label for the UI (clip filename or frame id). */
+  label: string;
+  /** Whether audio is available for this segment. */
+  hasAudio: boolean;
+  /** Which sources satisfy the audio requirement, if any. */
+  sources: ('embedded' | 'narration' | 'soundtrack')[];
+}
+
+/**
+ * Result of {@link ProjectOrchestrator.checkClipsAudio}. Drives the Studio
+ * warn-before-export gate; it never blocks export on its own.
+ */
+export interface AudioCheckResult {
+  /** True when every segment has audio available. */
+  ok: boolean;
+  /** True when the project has a background-music or narration soundtrack. */
+  hasSoundtrack: boolean;
+  /** Per-segment status, in play order. */
+  frames: FrameAudioStatus[];
+  /** Subset of `frames` with `hasAudio === false`. */
+  silent: FrameAudioStatus[];
+}
+
 export interface Project {
   id: string;
   name: string;
