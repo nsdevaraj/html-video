@@ -272,6 +272,20 @@ const DICT = {
     'tpl_preview.source_skill': 'Adapted from',
     'tpl_preview.source_origin': 'Design lineage',
     'tpl_preview.source_license': 'License',
+
+    // --- form / confirm cards (backfilled from app.js) ---
+    'form.drop_hint': '📎 Drag / paste / choose files as material (logo, screenshot, data CSV… optional)',
+    'form.add_file': '+ Add file',
+    'form.submit': 'Submit ↵',
+    'confirm.generate': '✓ Generate',
+    'confirm.edit': '✏️ Edit',
+
+    // --- text-pane save + misc toasts (backfilled from app.js) ---
+    'text_pane.save_failed': 'Save failed: {message}',
+    'text_pane.saved_changes': 'Saved {count} change(s)',
+    'frames.editing_this': 'Editing this frame',
+    'common.error': 'Error: {message}',
+    'common.init_failed': 'Init failed: {message}',
   },
 
   zh: {
@@ -528,6 +542,20 @@ const DICT = {
     'tpl_preview.source_skill': '改编自',
     'tpl_preview.source_origin': '设计渊源',
     'tpl_preview.source_license': '许可证',
+
+    // --- form / confirm cards (backfilled from app.js) ---
+    'form.drop_hint': '📎 拖拽 / 粘贴 / 选择文件作为素材（logo、截图、数据 CSV…可选）',
+    'form.add_file': '+ 添加文件',
+    'form.submit': '提交 ↵',
+    'confirm.generate': '✓ 开始生成',
+    'confirm.edit': '✏️ 修改',
+
+    // --- text-pane save + misc toasts (backfilled from app.js) ---
+    'text_pane.save_failed': '保存失败：{message}',
+    'text_pane.saved_changes': '已保存 {count} 处修改',
+    'frames.editing_this': '正在编辑此帧',
+    'common.error': '错误：{message}',
+    'common.init_failed': 'init 失败：{message}',
   },
 };
 
