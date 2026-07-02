@@ -45,6 +45,7 @@ const API = {
   setTemplate: (id, tid) => fetch(`/api/projects/${id}/template`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ template_id: tid }) }).then(r => r.json()),
   setAgent: (id, aid, model) => fetch(`/api/projects/${id}/agent`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agent_id: aid, ...(model !== undefined && { agent_model: model }) }) }).then(r => r.json()),
   exportMp4: id => fetch(`/api/projects/${id}/export`, { method: 'POST' }).then(r => r.json()),
+  audioCheck: id => fetch(`/api/projects/${id}/audio-check`, { method: 'POST' }).then(r => r.json()),
   getMessages: id => fetch(`/api/projects/${id}/messages`).then(r => r.json()),
   rawHtml: id => fetch(`/api/projects/${id}/raw-html`).then(r => r.ok ? r.text() : null),
   putRawHtml: (id, html) => fetch(`/api/projects/${id}/raw-html`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ html }) }).then(r => r.json()),
@@ -225,6 +226,76 @@ async function startExportStream() {
     toast(t('export.stream_interrupted', { message: (e?.message ?? e) }), 'error');
     renderToolbar();
   }
+}
+
+// ============== Pre-export "every clip has audio" gate ==============
+// Runs the audio-availability check first. If any segment is silent (no
+// embedded clip audio, no per-frame narration, no project soundtrack), it asks
+// the user to proceed or cancel before the (possibly long) export begins.
+// Proceeding logs which clips were silent, then runs the normal export stream.
+async function requestExport() {
+  if (!state.selected || state.exporting) return;
+  let check = null;
+  try {
+    check = await API.audioCheck(state.selected.id);
+  } catch {
+    // Check failed (e.g. ffprobe missing) — don't block the export.
+    check = null;
+  }
+  if (check && check.ok === false && Array.isArray(check.silent) && check.silent.length > 0) {
+    const proceed = await confirmSilentClips(check.silent);
+    if (!proceed) return;
+    // proceed-behavior: export as-is, but log which clips were silent.
+    const labels = check.silent.map((f) => f.label).join(', ');
+    state.messages.push({
+      role: 'system',
+      content: t('export.audio_warn', { count: String(check.silent.length), clips: labels }),
+      ts: Date.now(),
+    });
+    renderChatLog();
+  }
+  startExportStream();
+}
+
+// Promise-based confirm modal listing the silent segments. Resolves true when
+// the user clicks "Export anyway", false on cancel / backdrop / Escape.
+function confirmSilentClips(silent) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('audio-confirm-modal');
+    const body = document.getElementById('audio-confirm-body');
+    const okBtn = document.getElementById('audio-confirm-ok');
+    const cancelBtn = document.getElementById('audio-confirm-cancel');
+    // Modal markup missing for some reason — fail open so export still works.
+    if (!modal || !body || !okBtn || !cancelBtn) { resolve(true); return; }
+
+    const items = silent.map((f) => {
+      const kind = f.kind === 'clip' ? t('export.audio_kind_clip') : t('export.audio_kind_frame');
+      return `<li><span class="ac-kind">${esc(kind)}</span><span class="ac-label">${esc(f.label)}</span></li>`;
+    }).join('');
+    body.innerHTML = `
+      <p class="ac-intro">${esc(t('export.audio_intro', { count: String(silent.length) }))}</p>
+      <ul class="ac-list">${items}</ul>
+      <p class="ac-hint">${esc(t('export.audio_hint'))}</p>
+    `;
+    modal.classList.add('show');
+
+    let done = false;
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); cleanup(false); } };
+    function cleanup(result) {
+      if (done) return;
+      done = true;
+      modal.classList.remove('show');
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      modal.onclick = null;
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+    modal.onclick = (e) => { if (e.target === modal) cleanup(false); };
+    document.addEventListener('keydown', onKey, true);
+  });
 }
 
 // ============== Per-frame native enhancement (streamed) ==============
@@ -725,7 +796,7 @@ function wireToolbar() {
     exportBtn.onclick = () => {
       if (!state.selected) return;
       if (state.exporting) return;
-      startExportStream();
+      requestExport();
     };
   }
   const nameInput = document.getElementById('proj-name');
@@ -2473,7 +2544,7 @@ async function sendMessage() {
     ta.value = '';
     state.messages.push({ role: 'user', content: text, ts: Date.now() });
     renderChatLog();
-    startExportStream();
+    requestExport();
     return;
   }
 
