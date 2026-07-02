@@ -414,6 +414,20 @@ export async function startStudioServer(ctx: CliContext, port: number): Promise<
         }
       }
 
+      // Pre-export audio availability check (Studio "every clip has audio"
+      // gate). Returns per-segment audio status so the UI can warn before
+      // exporting a video with silent clips. Read-only — never mutates.
+      const audioCheckMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/audio-check$/);
+      if (audioCheckMatch && audioCheckMatch[1] && m === 'POST') {
+        try {
+          const result = await ctx.orchestrator.checkClipsAudio(audioCheckMatch[1]);
+          return json(res, 200, result);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return json(res, 500, { error: msg });
+        }
+      }
+
       // Export MP4 — streams progress via SSE so the user sees per-frame
       // recording status during a multi-minute multi-frame export.
       const expMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/export$/);
