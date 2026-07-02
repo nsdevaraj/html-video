@@ -1056,11 +1056,17 @@ async function muxAudioWithFfmpeg(args: {
     mixLabels.push('[vo]');
   }
   if (mixLabels.length === 2) {
-    filters.push(`${mixLabels[0]}${mixLabels[1]}amix=inputs=2:duration=longest:dropout_transition=0[aout]`);
+    filters.push(`${mixLabels[0]}${mixLabels[1]}amix=inputs=2:duration=longest:dropout_transition=0[amixed]`);
   } else {
-    // single source → relabel to [aout]
-    filters.push(`${mixLabels[0]}anull[aout]`);
+    // single source → relabel
+    filters.push(`${mixLabels[0]}anull[amixed]`);
   }
+  // Pad the mixed audio with trailing silence so it can never be SHORTER than
+  // the video. Otherwise `-shortest` clamps the whole output to a short audio
+  // track — e.g. a 10s intro narration would truncate an 80s video down to its
+  // first clip. `apad` makes the audio effectively unbounded; `-shortest` then
+  // trims it back to the video length, which is the alignment we actually want.
+  filters.push('[amixed]apad[aout]');
 
   const ffArgs = [
     '-y',
