@@ -11,7 +11,9 @@ import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
 import type {
   Asset,
+  AudioCheckResult,
   EngineId,
+  FrameAudioStatus,
   FrameRecord,
   Project,
   ProjectStatus,
@@ -446,6 +448,83 @@ export class ProjectOrchestrator {
     if (project.status === 'draft') project.status = 'previewed';
     await this.deps.projects.save(project);
     return { project, htmlPath: out.htmlPath };
+  }
+
+  /**
+   * Pre-export audio availability check (the Studio "every clip has audio"
+   * gate). Reports, per play-order segment, whether audio is available — an
+   * embedded audio track (imported clips), per-frame narration text, or a
+   * project-level soundtrack that plays across the whole video. The Studio UI
+   * uses this to warn before exporting a video with silent segments; it never
+   * blocks export itself.
+   */
+  async checkClipsAudio(projectId: string): Promise<AudioCheckResult> {
+    const project = await this.deps.projects.load(projectId);
+    const st = project.soundtrack;
+    const findPath = (id?: string): string | undefined =>
+      id ? project.assets.find((a) => a.id === id)?.path : undefined;
+    // A project soundtrack (music or narration asset that resolves to a file)
+    // plays over the whole timeline, so it covers every segment.
+    const hasSoundtrack = !!(findPath(st?.musicAssetId) || findPath(st?.narrationAssetId));
+    const narrationByFrame = st?.narrationByFrame ?? {};
+    const hasNarrationFor = (nodeId: string): boolean => {
+      const line = narrationByFrame[nodeId];
+      return typeof line === 'string' && line.trim().length > 0;
+    };
+
+    const frames: FrameAudioStatus[] = [];
+
+    if (project.frames && project.frames.length > 0) {
+      const ordered = [...project.frames].sort((a, b) => a.order - b.order);
+      for (let i = 0; i < ordered.length; i++) {
+        const f = ordered[i]!;
+        const sources: ('embedded' | 'narration' | 'soundtrack')[] = [];
+        if (hasSoundtrack) sources.push('soundtrack');
+        if (hasNarrationFor(f.graphNodeId)) sources.push('narration');
+
+        let kind: 'clip' | 'generated' = 'generated';
+        let label = f.graphNodeId;
+        if (f.clipAssetId) {
+          kind = 'clip';
+          const clipAsset = project.assets.find((a) => a.id === f.clipAssetId);
+          if (clipAsset?.metadata.filename) label = clipAsset.metadata.filename;
+          else if (clipAsset?.path) label = basename(clipAsset.path);
+          // Only imported clips can carry their own embedded audio track;
+          // generated frames always render silent.
+          if (clipAsset?.path) {
+            try {
+              if (await hasAudioStream(clipAsset.path)) sources.push('embedded');
+            } catch {
+              // ffprobe unavailable — can't confirm embedded audio, leave it off.
+            }
+          }
+        }
+
+        frames.push({
+          graphNodeId: f.graphNodeId,
+          order: i,
+          kind,
+          label,
+          hasAudio: sources.length > 0,
+          sources,
+        });
+      }
+    } else {
+      // Single-frame fast path: one generated segment, audio only from soundtrack.
+      const sources: ('embedded' | 'narration' | 'soundtrack')[] = [];
+      if (hasSoundtrack) sources.push('soundtrack');
+      frames.push({
+        graphNodeId: 'single',
+        order: 0,
+        kind: 'generated',
+        label: project.name,
+        hasAudio: sources.length > 0,
+        sources,
+      });
+    }
+
+    const silent = frames.filter((f) => !f.hasAudio);
+    return { ok: silent.length === 0, hasSoundtrack, frames, silent };
   }
 
   async exportMp4(args: {
