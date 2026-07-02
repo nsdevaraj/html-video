@@ -1188,6 +1188,40 @@ async function muxAudioWithFfmpeg(args: {
 /** Append this export to the project's history (newest last, de-duped by path,
  *  capped so it doesn't grow unbounded). */
 /**
+ * Detect whether a media file carries at least one audio stream, via ffprobe.
+ * Resolves false when there is no audio stream; rejects if ffprobe is
+ * unavailable or errors on the file (callers treat a throw as "can't confirm").
+ */
+async function hasAudioStream(filePath: string): Promise<boolean> {
+  const { execFile } = await import('node:child_process');
+  return new Promise<boolean>((resolve, reject) => {
+    execFile(
+      'ffprobe',
+      [
+        '-v', 'error',
+        '-select_streams', 'a',
+        '-show_entries', 'stream=index',
+        '-of', 'csv=p=0',
+        filePath,
+      ],
+      { timeout: 10_000 },
+      (err, stdout) => {
+        if (err) {
+          reject(
+            new HtmlVideoError(
+              'render-failed',
+              `ffprobe failed on "${filePath}": ${err.message}. Install ffmpeg (brew install ffmpeg).`,
+            ),
+          );
+          return;
+        }
+        resolve(stdout.trim().length > 0);
+      },
+    );
+  });
+}
+
+/**
  * Detect the video duration of an MP4 file via ffprobe (bundled with ffmpeg).
  * Returns seconds as a float. Throws if ffprobe is unavailable or the output
  * can't be parsed.
